@@ -1,0 +1,45 @@
+{
+  "appId": "com.twinmind.app",
+  "productName": "TwinMind",
+  "directories": {
+    "output": "release",
+    "buildResources": "resources"
+  },
+  "files": [
+    "dist/**",
+    "!dist/**/*.map",
+    "package.json"
+  ],
+  "asar": true,
+  "asarUnpack": [
+    "node_modules/better-sqlite3/**",
+    "node_modules/audiotee/**",
+    "node_modules/ffmpeg-static/**",
+    "node_modules/uiohook-napi/**",
+    "node_modules/@twinmind/coreaudio-darwin/**"
+  ],
+  "afterSign": "scripts/notarize.js",
+  "mac": {
+    "category": "public.app-category.productivity",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "resources/mac/entitlements.mac.plist",
+    "entitlementsInherit": "resources/mac/entitlements.mac.plist",
+    "minimumSystemVersion": "14.2",
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "TwinMind needs microphone access to record your voice for speech-to-text transcription.",
+      "NSAccessibilityUsageDescription": "TwinMind needs accessibility to listen for the dictation hotkey and paste transcribed text into other apps.",
+      "NSAudioCaptureUsageDescription": "TwinMind needs audio capture permission to record system audio (the other side of meetings) for transcription."
+    },
+    "target": [
+      { "target": "dmg", "arch": ["x64", "arm64"] },
+      { "target": "zip", "arch": ["x64", "arm64"] }
+    ]
+  },
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ]
+  }
+}
