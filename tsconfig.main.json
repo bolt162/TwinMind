@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist/main",
+    "rootDir": "src",
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": [
+    "src/main.ts",
+    "src/preload.ts",
+    "src/composition.ts",
+    "src/core/**/*",
+    "src/platform/**/*",
+    "src/ipc/**/*",
+    "src/main/**/*",
+    // Type-only file shared with audio-process. Including the single file
+    // (not the whole audio-process tree) keeps the main bundle clean.
+    "src/audio-process/protocol.ts"
+  ],
+  "exclude": ["src/renderer/**", "**/*.test.ts"]
+}

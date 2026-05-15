@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist/renderer",
+    "rootDir": "src",
+    "types": ["vite/client"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "src/renderer/**/*",
+    "src/ipc/channels.ts",
+    "src/ipc/validators.ts",
+    "src/core/hotkey/HotkeyTypes.ts"
+  ],
+  "exclude": ["**/*.test.ts"]
+}

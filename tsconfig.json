@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.main.json" },
+    { "path": "./tsconfig.audio-process.json" },
+    { "path": "./tsconfig.renderer.json" }
+  ]
+}

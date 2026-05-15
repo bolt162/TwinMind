@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist/audio-process",
+    "rootDir": "src",
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": [
+    "src/audio-process/**/*",
+    "src/core/util/**/*",
+    "src/core/audio/VadGate.ts",
+    "src/platform/audioteeBinaryPath.ts"
+  ],
+  "exclude": ["**/*.test.ts"]
+}
