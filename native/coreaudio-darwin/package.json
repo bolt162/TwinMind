@@ -1,0 +1,21 @@
+{
+  "name": "@twinmind/coreaudio-darwin",
+  "version": "0.1.0",
+  "description": "Native macOS audio: AVAudioEngine mic capture + kAudioDevicePropertyDeviceIsRunningSomewhere monitor.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "os": ["darwin"],
+  "scripts": {
+    "install": "node-gyp rebuild",
+    "rebuild": "node-gyp rebuild",
+    "clean": "node-gyp clean"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.2.0"
+  },
+  "gypfile": true,
+  "private": true
+}
