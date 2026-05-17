@@ -1,0 +1,437 @@
+/**
+ * OnboardingFlow — multi-step setup wizard.
+ *
+ * Steps (§16.1): welcome → mic permission → audio capture → accessibility →
+ * notifications → Groq key → done.
+ *
+ * The flow writes `onboardingCompletedAt` on the last step. App.tsx routes to
+ * this component when that field is null. The Groq key step is skippable —
+ * users can paste the key later via Settings → Advanced — but transcription
+ * won't work until one is provided.
+ */
+
+import { useEffect, useState } from 'react';
+import { Check, ChevronRight, Mic, Radio, Accessibility, Bell, Key } from 'lucide-react';
+import type { Settings } from '../hooks/useSettings';
+import { cn } from '../components/cn';
+
+type Step =
+  | 'welcome'
+  | 'mic'
+  | 'audioCapture'
+  | 'accessibility'
+  | 'notifications'
+  | 'groqKey'
+  | 'done';
+
+interface OnboardingFlowProps {
+  readonly settings: Settings;
+  readonly save: (s: Settings) => Promise<void>;
+}
+
+export function OnboardingFlow({ settings, save }: OnboardingFlowProps) {
+  const [step, setStep] = useState<Step>('welcome');
+
+  const advance = (next: Step) => setStep(next);
+  const complete = async () => {
+    // Mutate the parent App's settings state, which re-renders App and routes
+    // us to the main Layout (App reads `settings.onboardingCompletedAt`).
+    await save({ ...settings, onboardingCompletedAt: Date.now() });
+  };
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-8 text-zinc-100">
+      <div className="w-full max-w-xl rounded-2xl border border-zinc-800 bg-zinc-900/60 p-8 shadow-2xl">
+        {step === 'welcome' && <WelcomeStep onNext={() => advance('mic')} />}
+        {step === 'mic' && <MicStep onNext={() => advance('audioCapture')} />}
+        {step === 'audioCapture' && <AudioCaptureStep onNext={() => advance('accessibility')} />}
+        {step === 'accessibility' && <AccessibilityStep onNext={() => advance('notifications')} />}
+        {step === 'notifications' && <NotificationsStep onNext={() => advance('groqKey')} />}
+        {step === 'groqKey' && <GroqKeyStep onNext={() => advance('done')} />}
+        {step === 'done' && <DoneStep onComplete={complete} />}
+      </div>
+    </div>
+  );
+}
+
+function StepHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="mb-6">
+      <h1 className="text-xl font-semibold tracking-tight text-zinc-50">{title}</h1>
+      <p className="mt-1 text-sm text-zinc-400">{subtitle}</p>
+    </div>
+  );
+}
+
+function PrimaryButton({
+  onClick,
+  children,
+  disabled,
+}: {
+  onClick: () => void | Promise<void>;
+  children: React.ReactNode;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors',
+        'bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-40',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SecondaryButton({
+  onClick,
+  children,
+}: {
+  onClick: () => void | Promise<void>;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-sm text-zinc-400 hover:text-zinc-200"
+    >
+      {children}
+    </button>
+  );
+}
+
+function WelcomeStep({ onNext }: { onNext: () => void }) {
+  return (
+    <>
+      <StepHeader
+        title="Welcome to TwinMind"
+        subtitle="Real-time dictation + meeting transcription on your Mac."
+      />
+      <ul className="mb-6 space-y-2 text-sm text-zinc-300">
+        <li className="flex items-center gap-2">
+          <Check className="h-4 w-4 text-emerald-500" /> Audio never leaves your machine without
+          consent.
+        </li>
+        <li className="flex items-center gap-2">
+          <Check className="h-4 w-4 text-emerald-500" /> Everything works offline; transcripts
+          upload when you're back online.
+        </li>
+        <li className="flex items-center gap-2">
+          <Check className="h-4 w-4 text-emerald-500" /> A floating mic button stays accessible
+          across all Spaces.
+        </li>
+      </ul>
+      <PrimaryButton onClick={onNext}>
+        Get started <ChevronRight className="h-4 w-4" />
+      </PrimaryButton>
+    </>
+  );
+}
+
+function MicStep({ onNext }: { onNext: () => void }) {
+  const [granted, setGranted] = useState<boolean | null>(null);
+  const [requesting, setRequesting] = useState(false);
+
+  // Read the OS grant on mount so a prior install's "granted" shows the
+  // check immediately, without making the user click Grant again.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await window.electronAPI.permissions.read({ kind: 'mic' });
+        if (!cancelled) setGranted(r.grant === 'granted' ? true : null);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const request = async () => {
+    setRequesting(true);
+    try {
+      const r = await window.electronAPI.permissions.requestMic();
+      setGranted(r.granted);
+    } finally {
+      setRequesting(false);
+    }
+  };
+  return (
+    <>
+      <StepHeader
+        title="Microphone access"
+        subtitle="Required to record your voice. You'll see the macOS prompt."
+      />
+      <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <Mic className="h-6 w-6 text-zinc-300" />
+        <div className="text-sm text-zinc-300">
+          {granted === true && <span className="text-emerald-400">Granted ✓</span>}
+          {granted === false && (
+            <span className="text-amber-400">
+              Denied. Open System Settings → Privacy → Microphone to grant manually.
+            </span>
+          )}
+          {granted === null && 'Click below to request.'}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        {granted !== true && (
+          <PrimaryButton onClick={request} disabled={requesting}>
+            {requesting ? 'Requesting…' : 'Grant'}
+          </PrimaryButton>
+        )}
+        <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+// macOS has no introspection API for NSAudioCaptureUsageDescription or
+// notifications grant state — Electron can't tell us "is system audio
+// allowed?" without actually probing (which would fire a dialog if state is
+// not_determined). We persist a "user previously granted in this app"
+// hint to localStorage so a re-opened onboarding shows the green check
+// without re-probing. Stale if user revokes via System Settings, but
+// onboarding is one-time so that's an edge case.
+const AUDIO_CAP_GRANTED_KEY = 'twinmind.permissions.audioCaptureGranted';
+const NOTIFICATIONS_REQUESTED_KEY = 'twinmind.permissions.notificationsRequested';
+
+function readLocalFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeLocalFlag(key: string, value: boolean): void {
+  try {
+    if (value) localStorage.setItem(key, 'true');
+    else localStorage.removeItem(key);
+  } catch {
+    /* private mode or quota — fine, just no persistence */
+  }
+}
+
+function AudioCaptureStep({ onNext }: { onNext: () => void }) {
+  const [granted, setGranted] = useState<boolean | null>(() =>
+    readLocalFlag(AUDIO_CAP_GRANTED_KEY) ? true : null,
+  );
+  const [requesting, setRequesting] = useState(false);
+  const request = async () => {
+    setRequesting(true);
+    try {
+      const r = await window.electronAPI.permissions.requestAudioCapture();
+      setGranted(r.granted);
+      if (r.granted) writeLocalFlag(AUDIO_CAP_GRANTED_KEY, true);
+    } finally {
+      setRequesting(false);
+    }
+  };
+  return (
+    <>
+      <StepHeader
+        title="Audio capture (meeting mode)"
+        subtitle="Lets TwinMind hear the other side of a Zoom/Meet call. Skippable — meetings will just be mic-only without it."
+      />
+      <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <Radio className="h-6 w-6 text-zinc-300" />
+        <div className="text-sm text-zinc-300">
+          {granted === true && <span className="text-emerald-400">Granted ✓</span>}
+          {granted === false && (
+            <span className="text-amber-400">
+              Not granted. You can flip the toggle in System Settings → Privacy → Audio Capture.
+            </span>
+          )}
+          {granted === null && 'Click Grant — macOS will show its "Audio Capture" prompt.'}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        {granted !== true && (
+          <PrimaryButton onClick={request} disabled={requesting}>
+            {requesting ? 'Requesting…' : 'Grant'}
+          </PrimaryButton>
+        )}
+        <SecondaryButton onClick={onNext}>
+          {granted === true ? 'Continue' : 'Skip for now'}
+        </SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+function AccessibilityStep({ onNext }: { onNext: () => void }) {
+  const [granted, setGranted] = useState<boolean | null>(null);
+  const [requesting, setRequesting] = useState(false);
+
+  // Poll the current Accessibility grant while the step is mounted. The user
+  // flips the toggle in System Settings — we mirror it back as a green check
+  // here so they know they're done.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await window.electronAPI.permissions.read({ kind: 'accessibility' });
+        if (!cancelled) setGranted(r.grant === 'granted');
+      } catch {
+        /* ignore transient IPC errors */
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const request = async () => {
+    setRequesting(true);
+    try {
+      // Surfaces the prompt + registers TwinMind in the TCC list AND opens
+      // the Accessibility pane. The user just flips the toggle from there.
+      await window.electronAPI.permissions.requestAccessibility();
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  return (
+    <>
+      <StepHeader
+        title="Accessibility (dictation paste + hotkey)"
+        subtitle="Required so TwinMind can paste dictated text and listen for global hotkeys. Without it, you'll have to press Cmd-V manually and the hotkey won't work."
+      />
+      <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <Accessibility className="h-6 w-6 text-zinc-300" />
+        <div className="text-sm text-zinc-300">
+          {granted === true ? (
+            <span className="text-emerald-400">Granted ✓</span>
+          ) : (
+            <>
+              Click Grant, then flip the toggle next to TwinMind in{' '}
+              <span className="font-mono">Privacy &amp; Security → Accessibility</span>.
+            </>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        {granted !== true && (
+          <PrimaryButton onClick={request} disabled={requesting}>
+            {requesting ? 'Opening…' : 'Grant'}
+          </PrimaryButton>
+        )}
+        <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+function NotificationsStep({ onNext }: { onNext: () => void }) {
+  const [granted, setGranted] = useState<boolean | null>(() =>
+    readLocalFlag(NOTIFICATIONS_REQUESTED_KEY) ? true : null,
+  );
+  const [requesting, setRequesting] = useState(false);
+  const request = async () => {
+    setRequesting(true);
+    try {
+      const r = await window.electronAPI.permissions.requestNotifications();
+      setGranted(r.granted);
+      if (r.granted) writeLocalFlag(NOTIFICATIONS_REQUESTED_KEY, true);
+    } finally {
+      setRequesting(false);
+    }
+  };
+  return (
+    <>
+      <StepHeader
+        title="Notifications"
+        subtitle="Used for the meeting auto-detect prompt. You can always disable detection in Settings."
+      />
+      <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <Bell className="h-6 w-6 text-zinc-300" />
+        <div className="text-sm text-zinc-300">
+          {granted === true ? (
+            <span className="text-emerald-400">Granted ✓</span>
+          ) : (
+            'Click Allow — macOS will show its notifications prompt.'
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        {granted !== true && (
+          <PrimaryButton onClick={request} disabled={requesting}>
+            {requesting ? 'Requesting…' : 'Allow'}
+          </PrimaryButton>
+        )}
+        <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+function GroqKeyStep({ onNext }: { onNext: () => void }) {
+  const [value, setValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await window.electronAPI.settings.setSecret({ name: 'groq_api_key', value });
+      onNext();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <>
+      <StepHeader
+        title="Groq API key"
+        subtitle="Needed for transcription. Stored encrypted in your Keychain — never leaves your machine in cleartext."
+      />
+      <div className="mb-4 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <Key className="h-6 w-6 text-zinc-300" />
+        <input
+          autoFocus
+          type="password"
+          value={value}
+          placeholder="paste sk-…"
+          onChange={(e) => setValue(e.target.value)}
+          className="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm placeholder:text-zinc-600"
+        />
+      </div>
+      {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
+      <p className="mb-4 text-xs text-zinc-500">
+        You can also paste a key later under Settings → Advanced.
+      </p>
+      <div className="flex items-center gap-3">
+        <PrimaryButton onClick={save} disabled={saving || value.length === 0}>
+          {saving ? 'Saving…' : 'Save and continue'}
+        </PrimaryButton>
+        <SecondaryButton onClick={onNext}>Skip for now</SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+function DoneStep({ onComplete }: { onComplete: () => Promise<void> }) {
+  return (
+    <>
+      <StepHeader
+        title="You're set"
+        subtitle="Press ⌘⇧D to start dictation, or use the floating mic button (bottom-right)."
+      />
+      <PrimaryButton onClick={onComplete}>Open TwinMind</PrimaryButton>
+    </>
+  );
+}
