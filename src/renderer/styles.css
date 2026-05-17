@@ -1,0 +1,15 @@
+/* Tailwind v4 — single-line CSS-first import. No config file needed. */
+@import 'tailwindcss';
+
+/* HUD-specific: make the HTML/body fully transparent so the round button
+   renders against the desktop wallpaper, not a white square. */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  /* Prevent the renderer process from showing a horizontal scrollbar when
+     the layout sits at exactly window width. */
+  overflow: hidden;
+}
