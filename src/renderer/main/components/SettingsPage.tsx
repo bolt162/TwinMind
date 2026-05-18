@@ -88,7 +88,6 @@ export function SettingsPage() {
             Setting a hotkey here disables the Fn (Globe) key.
           </span>
         </div>
-        <FnUsageTypeRow />
       </Section>
 
       <Section title="Advanced">
@@ -354,63 +353,6 @@ function InputDeviceField({
  * DarwinSecureStorage and persisted in JobStore.kv. The renderer never reads
  * it back; we only ask whether one is set (via settings.hasSecret).
  */
-/**
- * macOS `AppleFnUsageType` row — single button that flips the OS preference
- * to "Do Nothing" so the emoji picker never opens on Fn press. When already
- * set to 0, displays a "configured" hint instead of the button.
- */
-function FnUsageTypeRow() {
-  const [value, setValue] = useState<number | null | 'loading'>('loading');
-  const [working, setWorking] = useState(false);
-
-  const reload = async () => {
-    try {
-      const r = await window.electronAPI.system.getFnUsageType();
-      setValue(r.value);
-    } catch {
-      setValue(null);
-    }
-  };
-
-  useEffect(() => {
-    void reload();
-  }, []);
-
-  if (value === 'loading') return null;
-  const isDisabled = value === 0;
-  return (
-    <div className="space-y-1 pt-3">
-      <span className="block text-sm">macOS Fn key emoji picker</span>
-      <div className="flex items-center gap-3">
-        {isDisabled ? (
-          <span className="text-xs text-emerald-400">Disabled (recommended) ✓</span>
-        ) : (
-          <button
-            type="button"
-            disabled={working}
-            onClick={async () => {
-              setWorking(true);
-              try {
-                await window.electronAPI.system.setFnUsageType({ value: 0 });
-                await reload();
-              } finally {
-                setWorking(false);
-              }
-            }}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-          >
-            {working ? 'Applying…' : 'Disable Fn → emoji picker'}
-          </button>
-        )}
-      </div>
-      <span className="block text-xs text-zinc-500">
-        Prevents macOS from opening the emoji picker when you press Fn, so it doesn't race
-        TwinMind's hotkey. You can re-enable it any time in System Settings → Keyboard.
-      </span>
-    </div>
-  );
-}
-
 function GroqKeyField() {
   const [present, setPresent] = useState<boolean | null>(null);
   const [value, setValue] = useState('');

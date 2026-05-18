@@ -371,6 +371,11 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
       if (nextHotkey && !isFnOnlyHotkey(nextHotkey)) {
         primaryHotkeyUnregister = registerPrimaryHotkey(c, nextHotkey);
       }
+      // Re-evaluate OS-level Fn behavior whenever the hotkey changes. If the
+      // user just switched TO Fn (or cleared their hotkey), neutralize it.
+      // If they switched AWAY from Fn we leave the OS alone — they keep
+      // whatever Fn behavior was last set (we don't restore an "original").
+      ensureFnFreedIfHotkeyIsFn(nextHotkey, c.logger);
       // Push to all renderers so the HUD chip + future hints refresh live.
       broadcastHotkeyChanged(nextHotkey);
     }
@@ -484,30 +489,6 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
       return { devices };
     } catch {
       return { devices: [] };
-    }
-  });
-  b.handle(REQUEST.SYSTEM_GET_FN_USAGE, () => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const native = require('@twinmind/coreaudio-darwin') as {
-        fnUsageType?: () => { get: () => number | null };
-      };
-      const value = native.fnUsageType?.().get() ?? null;
-      return { value };
-    } catch {
-      return { value: null };
-    }
-  });
-  b.handle(REQUEST.SYSTEM_SET_FN_USAGE, (input) => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const native = require('@twinmind/coreaudio-darwin') as {
-        fnUsageType?: () => { set: (v: number) => boolean };
-      };
-      const ok = native.fnUsageType?.().set(input.value) ?? false;
-      return { ok };
-    } catch {
-      return { ok: false };
     }
   });
   b.handle(REQUEST.DIAGNOSTIC_MEETING_DETECTION_STATUS, () => {
@@ -706,6 +687,46 @@ function isFnOnlyHotkey(h: Hotkey): boolean {
 }
 
 /**
+ * If Fn is the active hotkey, force the macOS "Press 🌐 key to:" preference
+ * to "Do Nothing" (AppleFnUsageType=0). With the default value (1, "Show
+ * Emoji & Symbols") the OS races our CGEventTap and pops the emoji picker
+ * mid-hotkey-press, especially under meeting-mode load. Setting it to 0
+ * makes the OS not even try — the race disappears entirely.
+ *
+ * Only applied when Fn is what TwinMind listens to. If the user picked a
+ * different hotkey, we leave their OS Fn behavior alone so they can keep
+ * using the emoji picker / input-source switch / system dictation on Fn.
+ *
+ * Best-effort: any failure to read or write is swallowed. The worst case is
+ * the user occasionally seeing the emoji picker flash, which is the same as
+ * the pre-fix state — never a regression.
+ */
+function ensureFnFreedIfHotkeyIsFn(
+  hotkey: Hotkey | null,
+  logger: ComposedApp['logger'],
+): void {
+  if (process.platform !== 'darwin') return;
+  // Fn is the active hotkey iff there's no primary OR the primary IS Fn.
+  if (hotkey !== null && !isFnOnlyHotkey(hotkey)) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const native = require('@twinmind/coreaudio-darwin') as {
+      fnUsageType?: () => { get(): number | null; set(value: number): boolean };
+    };
+    const fn = native.fnUsageType?.();
+    if (!fn) return;
+    const current = fn.get();
+    if (current === 0) return; // already configured the way we want it
+    const ok = fn.set(0);
+    logger.info('fn-usage-type set to 0 (Do Nothing)', { previous: current, ok });
+  } catch (err) {
+    logger.warn('fn-usage-type set skipped (native helper unavailable)', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Probe macOS system-audio capture permission by briefly running audiotee.
  * macOS 14.2+ has no introspection API for `NSAudioCaptureUsageDescription`;
  * the OS only triggers the prompt when an actual capture attempt is made.
@@ -863,6 +884,10 @@ function wireBehaviors(c: ComposedApp): void {
   if (primaryHotkey && !isFnOnlyHotkey(primaryHotkey)) {
     primaryHotkeyUnregister = registerPrimaryHotkey(c, primaryHotkey);
   }
+  // Silent on every launch: neutralize the OS-level Fn behavior if Fn is our
+  // hotkey, so the emoji picker never races our CGEventTap. No-op if the
+  // user picked a non-Fn hotkey, and no-op if it's already set to 0.
+  ensureFnFreedIfHotkeyIsFn(primaryHotkey, c.logger);
 
   // ─── Globe (Fn) key: same gesture set as the primary hotkey ─────────────
   // Hold → dictation, double-tap → start meeting, single-tap → stop meeting.

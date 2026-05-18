@@ -14,23 +14,25 @@
 // the OS pops the panel. Setting the preference to 0 makes the OS not even
 // try — the race disappears entirely.
 //
-// We read/write NSGlobalDomain via CFPreferences (no special entitlements
-// required) and post a Darwin notification so HIDServer reloads the new
-// value live, avoiding a logout-to-apply cycle. Best-effort: if the live
-// reload doesn't fire, the value still persists for next login.
+// We read/write the `com.apple.HIToolbox` preferences domain — NOT
+// NSGlobalDomain, despite older documentation that suggests otherwise. On
+// macOS 14+ (confirmed via System Settings → Keyboard diff), the toggle
+// writes only to `~/Library/Preferences/com.apple.HIToolbox.plist`; writing
+// to `kCFPreferencesAnyApplication` silently persists to a ghost key that
+// nothing reads.
 
 #include <napi.h>
 #import <Foundation/Foundation.h>
 #include <notify.h>
 
 #define kFnUsageKey CFSTR("AppleFnUsageType")
+#define kFnUsageDomain CFSTR("com.apple.HIToolbox")
 
 // Returns the current AppleFnUsageType as a Number, or null if the key is
 // unset (in which case the OS behaves as if it were 1).
 static Napi::Value GetFnUsageType(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
-  CFPropertyListRef val =
-      CFPreferencesCopyAppValue(kFnUsageKey, kCFPreferencesAnyApplication);
+  CFPropertyListRef val = CFPreferencesCopyAppValue(kFnUsageKey, kFnUsageDomain);
   if (!val) return env.Null();
 
   int32_t out = -1;
@@ -54,16 +56,17 @@ static Napi::Value SetFnUsageType(const Napi::CallbackInfo &info) {
   CFNumberRef num = CFNumberCreate(NULL, kCFNumberSInt32Type, &value);
   if (!num) return Napi::Boolean::New(env, false);
 
-  CFPreferencesSetAppValue(kFnUsageKey, num, kCFPreferencesAnyApplication);
+  CFPreferencesSetAppValue(kFnUsageKey, num, kFnUsageDomain);
   CFRelease(num);
 
-  Boolean ok = CFPreferencesAppSynchronize(kCFPreferencesAnyApplication);
+  Boolean ok = CFPreferencesAppSynchronize(kFnUsageDomain);
 
   // Nudge the input subsystem to re-read its preference. The exact channel
-  // name varies across macOS versions; broadcast both candidates and ignore
+  // name varies across macOS versions; broadcast a few candidates and ignore
   // the (lack of) return value — these notifications have no acknowledge.
+  notify_post("com.apple.HIToolbox.UpdateModifierMapping");
+  notify_post("com.apple.HIToolbox.prefsChanged");
   notify_post("com.apple.keyboard.modifiermapping.changed");
-  notify_post("com.apple.HIToolbox.GlobalShortcutChanged");
 
   return Napi::Boolean::New(env, ok ? true : false);
 }

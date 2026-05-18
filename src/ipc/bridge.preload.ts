@@ -114,11 +114,6 @@ const electronAPI = {
   recording_devices: {
     list: () => invoke(REQUEST.RECORDING_LIST_INPUT_DEVICES, {}),
   },
-  system: {
-    getFnUsageType: () => invoke(REQUEST.SYSTEM_GET_FN_USAGE, {}),
-    setFnUsageType: (input: RequestPayloads[typeof REQUEST.SYSTEM_SET_FN_USAGE]['input']) =>
-      invoke(REQUEST.SYSTEM_SET_FN_USAGE, input),
-  },
   on: {
     recordingStateChanged: (cb: (e: PushPayloads[typeof PUSH.RECORDING_STATE]) => void) =>
       subscribe(PUSH.RECORDING_STATE, cb),

@@ -84,12 +84,6 @@ declare global {
       readonly recording_devices: {
         list(): Promise<RequestPayloads['recording.listInputDevices']['output']>;
       };
-      readonly system: {
-        getFnUsageType(): Promise<RequestPayloads['system.getFnUsageType']['output']>;
-        setFnUsageType(
-          input: RequestPayloads['system.setFnUsageType']['input'],
-        ): Promise<RequestPayloads['system.setFnUsageType']['output']>;
-      };
       readonly on: {
         recordingStateChanged(
           cb: (e: PushPayloads['recording_state_changed']) => void,

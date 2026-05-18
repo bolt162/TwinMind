@@ -62,8 +62,6 @@ export const REQUEST = {
   HOTKEY_CAPTURE_END: 'hotkey.captureEnd',
   RECORDING_LIST_INPUT_DEVICES: 'recording.listInputDevices',
   HUD_SET_MOUSE_IGNORE: 'hud.setMouseIgnore',
-  SYSTEM_GET_FN_USAGE: 'system.getFnUsageType',
-  SYSTEM_SET_FN_USAGE: 'system.setFnUsageType',
 } as const;
 export type RequestChannel = (typeof REQUEST)[keyof typeof REQUEST];
 
@@ -421,11 +419,4 @@ export interface RequestPayloads {
     output: RecordingListInputDevicesOutput;
   };
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: HudSetMouseIgnoreInput; output: Empty };
-  /**
-   * `value` is the macOS `AppleFnUsageType` (0=Do Nothing, 1=Emoji, 2=Input
-   * Source, 3=Dictation). `null` means the key isn't set (OS treats as 1) or
-   * we can't reach the native helper.
-   */
-  [REQUEST.SYSTEM_GET_FN_USAGE]: { input: Empty; output: { value: number | null } };
-  [REQUEST.SYSTEM_SET_FN_USAGE]: { input: { value: number }; output: { ok: boolean } };
 }
