@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 import { Check, ChevronRight, Mic, Radio, Accessibility, Bell, Key } from 'lucide-react';
 import type { Settings } from '../hooks/useSettings';
 import { cn } from '../components/cn';
+import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 type Step =
   | 'welcome'
@@ -48,7 +49,7 @@ export function OnboardingFlow({ settings, save }: OnboardingFlowProps) {
         {step === 'accessibility' && <AccessibilityStep onNext={() => advance('notifications')} />}
         {step === 'notifications' && <NotificationsStep onNext={() => advance('groqKey')} />}
         {step === 'groqKey' && <GroqKeyStep onNext={() => advance('done')} />}
-        {step === 'done' && <DoneStep onComplete={complete} />}
+        {step === 'done' && <DoneStep settings={settings} onComplete={complete} />}
       </div>
     </div>
   );
@@ -424,12 +425,25 @@ function GroqKeyStep({ onNext }: { onNext: () => void }) {
   );
 }
 
-function DoneStep({ onComplete }: { onComplete: () => Promise<void> }) {
+function DoneStep({
+  settings,
+  onComplete,
+}: {
+  settings: Settings;
+  onComplete: () => Promise<void>;
+}) {
+  // Render the actual configured hotkey. `hotkeys.primary` is null on a fresh
+  // install (we never inserted a hotkey-picker step in onboarding), in which
+  // case the Fn / Globe key is the default — match the convention used in
+  // HotkeyCaptureField and the HUD.
+  const primary =
+    (settings.hotkeys as { primary?: Hotkey | null } | undefined)?.primary ?? null;
+  const hotkeyLabel = primary ? formatHotkey(primary) : 'Fn';
   return (
     <>
       <StepHeader
         title="You're set"
-        subtitle="Press ⌘⇧D to start dictation, or use the floating mic button (bottom-right)."
+        subtitle={`Hold ${hotkeyLabel} to dictate. The floating mic pill at the bottom of your screen has the rest of the controls.`}
       />
       <PrimaryButton onClick={onComplete}>Open TwinMind</PrimaryButton>
     </>
