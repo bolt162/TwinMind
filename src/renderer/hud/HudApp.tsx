@@ -29,7 +29,7 @@ const BAR_COUNT = 20;
 const DECAY = 0.86;
 const PILL_HEIGHT_EXPANDED = 32;
 const PILL_HEIGHT_IDLE = 22;
-const PILL_HEIGHT_FAILED = 64;
+const PILL_HEIGHT_FAILED = 100;
 const BAR_MAX_HEIGHT_PX = 24;
 const BAR_MIN_HEIGHT_PX = 2;
 const AMP_GAIN = 2.4;
@@ -326,7 +326,7 @@ export function HudApp() {
           // "box" around the buttons on transparent backdrops.
           'transition-[width,height,padding] duration-150 ease-out',
           'overflow-hidden text-white select-none cursor-grab active:cursor-grabbing',
-          visual === 'failed' ? 'px-3 py-2 items-stretch' : expanded ? 'px-3' : 'px-2',
+          visual === 'failed' ? 'px-6 py-4 items-stretch' : expanded ? 'px-3' : 'px-2',
         ].join(' ')}
         style={{
           // Hover-idle width grows with the hotkey label so long bindings
@@ -458,7 +458,7 @@ function pillWidth(v: 'recording' | 'processing' | 'failed' | 'hoverIdle' | 'bus
     case 'processing':
       return 56;
     case 'failed':
-      return 340;
+      return 400;
   }
 }
 
@@ -588,32 +588,37 @@ function FailedBanner({ sessionId }: { sessionId: string }) {
     void window.electronAPI.main.showSessionsTab().catch(() => {});
   };
   return (
-    <span className="flex h-full w-full flex-col justify-between gap-1">
-      <span className="flex items-start gap-2">
-        <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-red-600/90">
-          <X className="h-2.5 w-2.5 text-white" strokeWidth={3} />
+    <span className="flex h-full w-full items-center justify-center gap-2">
+      <span className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+        <span className="flex items-center gap-2">
+          <X className="h-4 w-4 shrink-0 text-red-500" strokeWidth={3} />
+          <span className="font-serif text-[16px] font-semibold leading-tight text-white">
+            Something went wrong
+          </span>
         </span>
-        <span className="text-[11px] leading-tight text-white/85">
-          Something went wrong. Transcription failed to load. But you can always recover it from
-          the history.
+        <span
+          className="block text-left text-[13px] leading-snug text-white/75"
+          style={{ paddingLeft: 24, textWrap: 'balance' }}
+        >
+          Transcription failed to load. But you can always recover it from the history.
         </span>
       </span>
-      <span className="flex items-center justify-end gap-1.5">
+      <span className="flex shrink-0 flex-col justify-center gap-1.5">
         <button
           type="button"
           onClick={onHistory}
-          className="flex items-center gap-1 rounded-md border border-white/15 bg-white/5 px-2 py-0.5 text-[10px] font-medium text-white/85 hover:bg-white/10"
+          className="flex w-20 items-center justify-center gap-1 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[12px] font-medium text-white/85 hover:bg-white/10"
         >
-          <History className="h-3 w-3" />
+          <History className="h-3.5 w-3.5" />
           History
         </button>
         <button
           type="button"
           onClick={onRetry}
           disabled={retrying}
-          className="flex items-center gap-1 rounded-md border border-amber-700/70 bg-amber-900/40 px-2 py-0.5 text-[10px] font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-60"
+          className="flex w-20 items-center justify-center gap-1 rounded-md border border-amber-700/70 bg-amber-900/40 px-2 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-60"
         >
-          <RotateCw className={`h-3 w-3 ${retrying ? 'animate-spin' : ''}`} />
+          <RotateCw className={`h-3.5 w-3.5 ${retrying ? 'animate-spin' : ''}`} />
           Retry
         </button>
       </span>

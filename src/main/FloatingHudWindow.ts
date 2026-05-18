@@ -25,8 +25,8 @@ import { BrowserWindow, screen, type WebContents } from 'electron';
 // button (~32px + gap) — wider and taller than the recording/idle states —
 // so CSS transitions inside the renderer can grow the pill into the error
 // banner without resizing the BrowserWindow.
-const HUD_WIDTH = 420;
-const HUD_HEIGHT = 80;
+const HUD_WIDTH = 480;
+const HUD_HEIGHT = 124;
 const DISPLAY_MARGIN = 24;
 
 export class FloatingHudWindow {
