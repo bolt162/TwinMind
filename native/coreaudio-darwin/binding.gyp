@@ -7,7 +7,8 @@
         "src/MicCapture.mm",
         "src/MicMonitor.mm",
         "src/DeviceChangeMonitor.mm",
-        "src/GlobeKey.mm"
+        "src/GlobeKey.mm",
+        "src/Paste.mm"
       ],
       "include_dirs": [
         "<!(node -p \"require('node-addon-api').include_dir\")"

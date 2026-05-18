@@ -56,3 +56,10 @@ export declare function micMonitor(): IMicMonitorLike;
 export declare function deviceMonitor(): IDeviceChangeMonitorLike;
 export declare function listInputDevices(): InputDeviceInfo[];
 export declare function globeKey(): IGlobeKeyLike;
+
+/**
+ * Synthesize a Cmd+V keystroke. Returns true if the events were posted
+ * (caller should still gate on Accessibility being trusted, since CGEventPost
+ * silently drops events for untrusted processes).
+ */
+export declare function pasteCommandV(): boolean;

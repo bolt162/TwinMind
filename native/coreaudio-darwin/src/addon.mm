@@ -14,12 +14,14 @@ extern Napi::Object InitMicCapture(Napi::Env env, Napi::Object exports);
 extern Napi::Object InitMicMonitor(Napi::Env env, Napi::Object exports);
 extern Napi::Object InitDeviceChangeMonitor(Napi::Env env, Napi::Object exports);
 extern Napi::Object InitGlobeKey(Napi::Env env, Napi::Object exports);
+extern Napi::Object InitPaste(Napi::Env env, Napi::Object exports);
 
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   InitMicCapture(env, exports);
   InitMicMonitor(env, exports);
   InitDeviceChangeMonitor(env, exports);
   InitGlobeKey(env, exports);
+  InitPaste(env, exports);
   return exports;
 }
 

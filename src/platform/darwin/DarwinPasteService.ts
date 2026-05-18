@@ -6,29 +6,27 @@
  *
  * Strategy:
  *   1. Write the text to the system pasteboard via Electron's clipboard.
- *   2. If Accessibility is granted, invoke `osascript` to send Cmd-V to the
- *      frontmost app. This carries V1's working approach and avoids a native
- *      AXUIElement addon for MVP.
+ *   2. If Accessibility is granted, synthesize Cmd-V at the HID event tap
+ *      via the native `pasteCommandV()` export of `@twinmind/coreaudio-darwin`.
+ *      That export wraps CGEventPost, which only needs Accessibility — the
+ *      same grant the user already gave for the Globe-key tap.
  *   3. If Accessibility is NOT granted, return `clipboardOnly: true` so the
  *      UI can show a "press Cmd-V" hint.
  *
- * The osascript path takes ~150 ms end-to-end. A future native impl using
- * AXUIElement can drop that to ~20 ms but isn't worth the complexity for
- * a per-recording one-shot.
+ * Why not osascript: the previous implementation ran `osascript -e 'tell
+ * application "System Events" to keystroke …'`. Driving System Events via
+ * AppleScript counts as Apple Events / Automation, a *separate* TCC bucket
+ * from Accessibility, which surfaces a second "TwinMind wants to control
+ * System Events" dialog the first time the user dictates. CGEventPost piggy-
+ * backs on the Accessibility grant we already require, so no second dialog.
  */
 
-import { spawn } from 'node:child_process';
 import { clipboard, systemPreferences } from 'electron';
 import type { IPasteService, PasteResult } from '../IPasteService';
 
-/**
- * AppleScript that tells the frontmost app to issue Cmd-V. We use `delay 0.05`
- * so the keypress hits *after* the clipboard write has propagated.
- */
-const PASTE_SCRIPT = `
-delay 0.05
-tell application "System Events" to keystroke "v" using {command down}
-`;
+interface NativePasteModule {
+  pasteCommandV?: () => boolean;
+}
 
 export class DarwinPasteService implements IPasteService {
   /** Paste `text` into the active app, falling back to clipboard-only. */
@@ -39,11 +37,21 @@ export class DarwinPasteService implements IPasteService {
       return { pasted: false, clipboardOnly: true };
     }
 
+    // Small delay so the clipboard write has propagated through the
+    // pasteboard server before the Cmd-V keystroke fires. 50 ms matches what
+    // the prior osascript path used.
+    await sleep(50);
+
     try {
-      await this.runOsascript();
-      return { pasted: true, clipboardOnly: false };
+      const native = loadNative();
+      if (!native?.pasteCommandV) {
+        return { pasted: false, clipboardOnly: true, target: 'native addon missing' };
+      }
+      const ok = native.pasteCommandV();
+      return ok
+        ? { pasted: true, clipboardOnly: false }
+        : { pasted: false, clipboardOnly: true };
     } catch (err) {
-      // Surface as clipboard-only; the user can manually Cmd-V.
       return {
         pasted: false,
         clipboardOnly: true,
@@ -51,17 +59,24 @@ export class DarwinPasteService implements IPasteService {
       };
     }
   }
+}
 
-  /** Spawn `osascript -e <PASTE_SCRIPT>` and resolve on exit 0. */
-  private runOsascript(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const child = spawn('/usr/bin/osascript', ['-e', PASTE_SCRIPT], {
-        stdio: 'ignore',
-      });
-      child.on('exit', (code) => {
-        code === 0 ? resolve() : reject(new Error(`osascript exited ${code}`));
-      });
-      child.on('error', reject);
-    });
+let cachedNative: NativePasteModule | null | undefined;
+
+/**
+ * Lazy-load the native addon. Cached after first attempt — missing addons
+ * (dev environment, ABI mismatch) should not be retried on every paste.
+ */
+function loadNative(): NativePasteModule | null {
+  if (cachedNative !== undefined) return cachedNative;
+  try {
+    cachedNative = require('@twinmind/coreaudio-darwin') as NativePasteModule;
+  } catch {
+    cachedNative = null;
   }
+  return cachedNative;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }

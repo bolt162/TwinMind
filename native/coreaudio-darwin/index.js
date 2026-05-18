@@ -181,4 +181,28 @@ function globeKey() {
   };
 }
 
-module.exports = { micCapture, micMonitor, deviceMonitor, listInputDevices, globeKey };
+/**
+ * Synthesize a Cmd+V keystroke at the system event tap. Returns true on
+ * success, false if the addon is missing the export or the underlying call
+ * couldn't post events. Requires macOS Accessibility permission (same grant
+ * the Globe-key tap uses); without it, CGEventPost silently no-ops and we
+ * still return true — callers should treat that as "trusted to post, OS may
+ * or may not have delivered" and rely on the Accessibility check upstream.
+ */
+function pasteCommandV() {
+  if (typeof native.pasteCommandV !== 'function') return false;
+  try {
+    return Boolean(native.pasteCommandV());
+  } catch (_) {
+    return false;
+  }
+}
+
+module.exports = {
+  micCapture,
+  micMonitor,
+  deviceMonitor,
+  listInputDevices,
+  globeKey,
+  pasteCommandV,
+};
