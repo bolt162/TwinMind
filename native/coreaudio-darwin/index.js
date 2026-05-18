@@ -198,6 +198,34 @@ function pasteCommandV() {
   }
 }
 
+/**
+ * Read/write the macOS "Press 🌐 key to:" preference (`AppleFnUsageType` in
+ * NSGlobalDomain). Values: 0=Do Nothing, 1=Emoji & Symbols, 2=Change Input
+ * Source, 3=Start Dictation. TwinMind wants 0 so the emoji panel never
+ * races our CGEventTap.
+ */
+function fnUsageType() {
+  return {
+    get() {
+      if (typeof native.getFnUsageType !== 'function') return null;
+      try {
+        const v = native.getFnUsageType();
+        return typeof v === 'number' ? v : null;
+      } catch (_) {
+        return null;
+      }
+    },
+    set(value) {
+      if (typeof native.setFnUsageType !== 'function') return false;
+      try {
+        return Boolean(native.setFnUsageType(Number(value)));
+      } catch (_) {
+        return false;
+      }
+    },
+  };
+}
+
 module.exports = {
   micCapture,
   micMonitor,
@@ -205,4 +233,5 @@ module.exports = {
   listInputDevices,
   globeKey,
   pasteCommandV,
+  fnUsageType,
 };

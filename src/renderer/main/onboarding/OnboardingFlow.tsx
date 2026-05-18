@@ -11,7 +11,16 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Check, ChevronRight, Mic, Radio, Accessibility, Bell, Key } from 'lucide-react';
+import {
+  Check,
+  ChevronRight,
+  Mic,
+  Radio,
+  Accessibility,
+  Bell,
+  Key,
+  Keyboard,
+} from 'lucide-react';
 import type { Settings } from '../hooks/useSettings';
 import { cn } from '../components/cn';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
@@ -21,6 +30,7 @@ type Step =
   | 'mic'
   | 'audioCapture'
   | 'accessibility'
+  | 'fnKey'
   | 'notifications'
   | 'groqKey'
   | 'done';
@@ -46,7 +56,8 @@ export function OnboardingFlow({ settings, save }: OnboardingFlowProps) {
         {step === 'welcome' && <WelcomeStep onNext={() => advance('mic')} />}
         {step === 'mic' && <MicStep onNext={() => advance('audioCapture')} />}
         {step === 'audioCapture' && <AudioCaptureStep onNext={() => advance('accessibility')} />}
-        {step === 'accessibility' && <AccessibilityStep onNext={() => advance('notifications')} />}
+        {step === 'accessibility' && <AccessibilityStep onNext={() => advance('fnKey')} />}
+        {step === 'fnKey' && <FnKeyStep onNext={() => advance('notifications')} />}
         {step === 'notifications' && <NotificationsStep onNext={() => advance('groqKey')} />}
         {step === 'groqKey' && <GroqKeyStep onNext={() => advance('done')} />}
         {step === 'done' && <DoneStep settings={settings} onComplete={complete} />}
@@ -330,6 +341,105 @@ function AccessibilityStep({ onNext }: { onNext: () => void }) {
           </PrimaryButton>
         )}
         <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+/**
+ * FnKeyStep — flip macOS `AppleFnUsageType` to 0 ("Do Nothing").
+ *
+ * Why this exists: with the default `AppleFnUsageType = 1` ("Show Emoji &
+ * Symbols"), macOS opens the emoji picker whenever Fn is pressed. Our
+ * CGEventTap swallows Fn flagsChanged in *most* cases but loses the race
+ * under load (meeting mode is the worst — audiotee + utility process churn).
+ * Setting the OS preference to 0 makes the OS not even try; the race
+ * disappears.
+ *
+ * Auto-advance: if the value is already 0 we skip the step entirely so
+ * existing users don't see a "fix something that's already fine" UI.
+ */
+function FnKeyStep({ onNext }: { onNext: () => void }) {
+  const [value, setValue] = useState<number | null | 'loading'>('loading');
+  const [working, setWorking] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await window.electronAPI.system.getFnUsageType();
+        if (cancelled) return;
+        // `null` means the key is unset, which the OS treats as the default
+        // (1 / "Show Emoji & Symbols"). Treat it like 1 for the UI — we
+        // still want to flip it to 0.
+        const effective = r.value ?? 1;
+        setValue(effective);
+        // Already configured the way we want it — move on without showing
+        // the step.
+        if (effective === 0) onNext();
+      } catch {
+        if (!cancelled) setValue(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onNext]);
+
+  const apply = async () => {
+    setWorking(true);
+    try {
+      const r = await window.electronAPI.system.setFnUsageType({ value: 0 });
+      if (r.ok) {
+        setValue(0);
+        // Brief pause so the success state is visible before advancing.
+        setTimeout(onNext, 400);
+      }
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  if (value === 'loading' || value === 0) {
+    // Either we're still reading the current value, or we already advanced.
+    // Render nothing — the parent will swap us out within one tick.
+    return null;
+  }
+
+  const labelFor = (v: number | null): string => {
+    switch (v) {
+      case 1:
+        return 'Show Emoji & Symbols';
+      case 2:
+        return 'Change Input Source';
+      case 3:
+        return 'Start Dictation';
+      case null:
+        return 'Default (Show Emoji & Symbols)';
+      default:
+        return `Value ${v}`;
+    }
+  };
+
+  return (
+    <>
+      <StepHeader
+        title="Free up the Fn key"
+        subtitle="macOS uses Fn for the emoji picker by default, which conflicts with TwinMind's hotkey. We need to set it to 'Do Nothing' so the picker doesn't pop while you're dictating."
+      />
+      <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        <Keyboard className="h-6 w-6 text-zinc-300" />
+        <div className="text-sm text-zinc-300">
+          Currently set to <span className="font-mono">{labelFor(value)}</span>. We'll change it
+          to <span className="font-mono">Do Nothing</span>. You can flip it back any time in
+          System Settings → Keyboard.
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        <PrimaryButton onClick={apply} disabled={working}>
+          {working ? 'Applying…' : 'Change it for me'}
+        </PrimaryButton>
+        <SecondaryButton onClick={onNext}>Skip for now</SecondaryButton>
       </div>
     </>
   );

@@ -486,6 +486,30 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
       return { devices: [] };
     }
   });
+  b.handle(REQUEST.SYSTEM_GET_FN_USAGE, () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const native = require('@twinmind/coreaudio-darwin') as {
+        fnUsageType?: () => { get: () => number | null };
+      };
+      const value = native.fnUsageType?.().get() ?? null;
+      return { value };
+    } catch {
+      return { value: null };
+    }
+  });
+  b.handle(REQUEST.SYSTEM_SET_FN_USAGE, (input) => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const native = require('@twinmind/coreaudio-darwin') as {
+        fnUsageType?: () => { set: (v: number) => boolean };
+      };
+      const ok = native.fnUsageType?.().set(input.value) ?? false;
+      return { ok };
+    } catch {
+      return { ok: false };
+    }
+  });
   b.handle(REQUEST.DIAGNOSTIC_MEETING_DETECTION_STATUS, () => {
     const rows = c.jobStore.listMicActivityEvents(50);
     return {

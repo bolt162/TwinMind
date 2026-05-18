@@ -63,3 +63,18 @@ export declare function globeKey(): IGlobeKeyLike;
  * silently drops events for untrusted processes).
  */
 export declare function pasteCommandV(): boolean;
+
+export interface IFnUsageTypeLike {
+  /**
+   * Read NSGlobalDomain.AppleFnUsageType. Returns:
+   *   0 = Do Nothing
+   *   1 = Show Emoji & Symbols (macOS default)
+   *   2 = Change Input Source
+   *   3 = Start Dictation
+   *   null = key unset (OS treats as 1) or addon missing
+   */
+  get(): number | null;
+  /** Persist and live-reload the value. Returns true on success. */
+  set(value: number): boolean;
+}
+export declare function fnUsageType(): IFnUsageTypeLike;

@@ -288,6 +288,14 @@ export const RequestSchemas = {
     output: recordingListInputDevicesOutput,
   },
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: hudSetMouseIgnoreInput, output: empty },
+  [REQUEST.SYSTEM_GET_FN_USAGE]: {
+    input: empty,
+    output: z.object({ value: z.number().int().min(0).max(3).nullable() }).strict(),
+  },
+  [REQUEST.SYSTEM_SET_FN_USAGE]: {
+    input: z.object({ value: z.number().int().min(0).max(3) }).strict(),
+    output: z.object({ ok: z.boolean() }).strict(),
+  },
 } as const;
 
 export type RequestChannelName = keyof typeof RequestSchemas;
