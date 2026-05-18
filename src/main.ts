@@ -969,15 +969,20 @@ function wireBehaviors(c: ComposedApp): void {
         {
           title: 'Recording detected',
           body: 'Start a meeting note?',
-          actions: [
-            { id: 'start', label: 'Start recording' },
-            { id: 'dismiss', label: 'Not now' },
-          ],
+          // Single inline "Start" action plus a labelled close button so both
+          // affordances surface on macOS Banner-style notifications (multi-
+          // action arrays get folded into an Options dropdown otherwise).
+          actions: [{ id: 'start', label: 'Start' }],
+          closeButtonText: 'Dismiss',
           autoDismissMs: 60_000,
         },
         (action) => {
           const outcome =
-            action === 'start' ? 'accepted' : action === '__dismissed__' ? 'timed_out' : 'dismissed';
+            action === 'start'
+              ? 'accepted'
+              : action === '__timed_out__'
+                ? 'timed_out'
+                : 'dismissed';
           c.meetingDetection?.recordOutcome(evt.promptId, outcome);
           c.analytics.track('meeting_notification_outcome', { action: outcome });
           if (outcome === 'accepted') {

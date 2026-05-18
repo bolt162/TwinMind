@@ -25,30 +25,40 @@ export class DarwinNotificationService implements INotificationService {
       body: spec.body,
       silent: true, // architecture §8.4: "No sound"
       actions: (spec.actions ?? []).map((a) => ({ type: 'button', text: a.label })),
+      ...(spec.closeButtonText ? { closeButtonText: spec.closeButtonText } : {}),
     };
     const n = new Notification(options);
 
+    // `close` fires for BOTH the auto-dismiss timer and a user clicking the
+    // close button — distinguish them by tracking which path closed it.
+    let closedByTimer = false;
+    let closedByApi = false;
+
     // Map Electron's response events back into the action-id contract.
-    // `n.on('action', (_e, idx))` fires when the user clicks one of the buttons.
     n.on('action', (_event, index) => {
       const action = spec.actions?.[index];
       if (action) onAction(action.id);
     });
-    // Body click → main app surface.
     n.on('click', () => onAction('__body__'));
-    n.on('close', () => onAction('__dismissed__'));
+    n.on('close', () => {
+      if (closedByApi) return; // programmatic close (caller dismissed it)
+      onAction(closedByTimer ? '__timed_out__' : '__close__');
+    });
 
     n.show();
 
-    // Auto-dismiss after the configured timeout (architecture §8.4: 60 s).
     let timer: NodeJS.Timeout | null = null;
     if (spec.autoDismissMs) {
-      timer = setTimeout(() => n.close(), spec.autoDismissMs);
+      timer = setTimeout(() => {
+        closedByTimer = true;
+        n.close();
+      }, spec.autoDismissMs);
     }
 
     return {
       close() {
         if (timer) clearTimeout(timer);
+        closedByApi = true;
         n.close();
       },
     };
