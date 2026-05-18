@@ -5,22 +5,35 @@
  *   ─────────────
  *   Quit TwinMind     → terminates the app via the normal before-quit path.
  *
- * Minimal on purpose: V1 had show/hide-HUD and Settings-driven visibility,
- * but the user explicitly asked for the bare minimum here. Add items later
- * by extending `buildMenuTemplate()`.
+ * Icon: loaded from a real PNG file in `resources/tray/` (16×16 + 32×32 @2x).
+ * Falls back to a runtime-generated black-dot bitmap so dev environments
+ * without a packaged copy of `resources/` still get a working tray. Template-
+ * image semantics make the silhouette auto-tint for dark / light menu bars.
+ *
+ * Once the app falls back to "tray-only" mode (main window destroyed,
+ * Dock icon hidden), this icon is the user's only persistent access point.
+ * Failures are logged at error so support has something to look at.
  */
 
+import path from 'node:path';
+import fs from 'node:fs';
 import { app, Menu, nativeImage, Tray, type NativeImage } from 'electron';
+import { type Logger, noopLogger } from '@core/observability/Logger';
 
 export interface TrayManagerDeps {
   /** Opens the main window's Home tab. Provided by main.ts. */
   readonly onOpenHome: () => void;
+  /** Logger for diagnosing init failures in the field. */
+  readonly logger?: Logger;
 }
 
 export class TrayManager {
   private tray: Tray | null = null;
+  private readonly logger: Logger;
 
-  constructor(private readonly deps: TrayManagerDeps) {}
+  constructor(private readonly deps: TrayManagerDeps) {
+    this.logger = deps.logger ?? noopLogger;
+  }
 
   /**
    * Create the tray icon + menu. Safe to call multiple times — re-init is a
@@ -31,10 +44,20 @@ export class TrayManager {
     if (this.tray) return true;
     if (process.platform !== 'darwin' && process.platform !== 'win32') return false;
 
-    const icon = loadTrayIcon();
-    if (!icon || icon.isEmpty()) return false;
+    const icon = loadTrayIcon(this.logger);
+    if (!icon || icon.isEmpty()) {
+      this.logger.error('tray-init failed: icon empty or missing');
+      return false;
+    }
 
-    this.tray = new Tray(icon);
+    try {
+      this.tray = new Tray(icon);
+    } catch (err) {
+      this.logger.error('tray-init failed: new Tray() threw', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
     this.tray.setToolTip('TwinMind');
 
     if (process.platform === 'darwin') {
@@ -44,6 +67,7 @@ export class TrayManager {
     }
 
     this.tray.setContextMenu(this.buildMenu());
+    this.logger.info('tray initialized');
     return true;
   }
 
@@ -70,18 +94,45 @@ export class TrayManager {
 }
 
 /**
- * Generate a generic 16×16 tray icon at runtime: a small black filled
- * circle on a transparent background. Self-contained — no asset file to
- * ship, no sizing surprises (we control the raw bitmap dimensions
- * directly, so macOS sees a 16×16 logical icon and renders at the
- * standard menu-bar size).
- *
- * macOS template-image flag makes the circle auto-tint for the dark or
- * light menu bar. Drop a real branded `iconTemplate@2x.png` into
- * `resources/` and load it via `nativeImage.createFromPath` here later
- * when you want the TwinMind brand back.
+ * Locate the bundled tray-icon PNG. `extraResources` copies `resources/tray`
+ * to `Contents/Resources/tray/` in packaged builds; in dev we look two levels
+ * above the compiled `dist/main/` for the repo's `resources/tray`.
  */
-function loadTrayIcon(): NativeImage {
+function resolveTrayIconPath(): string | null {
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'tray', 'iconTemplate.png')]
+    : [
+        path.join(__dirname, '..', '..', 'resources', 'tray', 'iconTemplate.png'),
+        path.join(process.cwd(), 'resources', 'tray', 'iconTemplate.png'),
+      ];
+  return candidates.find((p) => fileExists(p)) ?? null;
+}
+
+function fileExists(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function loadTrayIcon(logger: Logger): NativeImage | null {
+  const pngPath = resolveTrayIconPath();
+  if (pngPath) {
+    const img = nativeImage.createFromPath(pngPath);
+    if (!img.isEmpty()) {
+      if (process.platform === 'darwin') img.setTemplateImage(true);
+      return img;
+    }
+    logger.warn('tray-icon PNG loaded as empty image', { pngPath });
+  } else {
+    logger.warn('tray-icon PNG not found; falling back to runtime bitmap');
+  }
+  return buildFallbackBitmap();
+}
+
+/** Fallback: tiny 16×16 black circle bitmap. Same shape as the shipped PNG. */
+function buildFallbackBitmap(): NativeImage {
   const SIZE = 16;
   const RADIUS = 5;
   const bitmap = Buffer.alloc(SIZE * SIZE * 4);
@@ -92,9 +143,6 @@ function loadTrayIcon(): NativeImage {
       const dy = y - center;
       const inside = Math.sqrt(dx * dx + dy * dy) <= RADIUS;
       const offset = (y * SIZE + x) * 4;
-      // Black RGB, alpha 255 inside the circle, 0 (transparent) outside.
-      // Template-image mode treats RGB as the silhouette and uses alpha for
-      // coverage — macOS recolors the silhouette per menu-bar theme.
       bitmap[offset] = 0;
       bitmap[offset + 1] = 0;
       bitmap[offset + 2] = 0;

@@ -67,9 +67,17 @@ export class FloatingHudWindow {
     });
 
     // Show across all macOS Spaces — including fullscreen apps the user
-    // is dictating into. The second arg matters; without it, the HUD
-    // disappears when any other app goes fullscreen.
-    this.win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    // is dictating into. `visibleOnFullScreen: true` is needed so the HUD
+    // doesn't disappear when any other app goes fullscreen.
+    // `skipTransformProcessType: true` (V1 carries this) stops Electron
+    // from auto-toggling the app's UIElement / Foreground process type as
+    // a side effect — without it, setting `visibleOnAllWorkspaces(true)`
+    // can silently demote the app to UIElement on some macOS versions and
+    // confuse the Dock-visibility logic in createMainWindow.
+    this.win.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: true,
+    });
 
     // `floating` keeps us above normal windows but below the screensaver
     // and notifications, which is the right place for a control HUD.

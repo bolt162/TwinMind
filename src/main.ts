@@ -312,7 +312,21 @@ function buildPlatformServices(): PlatformServices {
   };
 }
 
-/** Build the main browser window with our preload + sandboxed renderer. */
+/** Build the main browser window with our preload + sandboxed renderer.
+ *
+ * V1-style lifecycle (macOS):
+ *  - Window is shown on creation and the Dock icon is brought visible.
+ *  - When the user closes the window (clicks X), the BrowserWindow is fully
+ *    destroyed (Electron's default). The 'closed' handler nulls our ref AND
+ *    hides the Dock icon, putting the app into "tray-only" mode.
+ *  - Subsequent opens (tray "Home", HUD Home button, Dock-click via
+ *    `app.on('activate')`) call createMainWindow() again, which recreates
+ *    the window on the user's *current* Space and re-shows the Dock icon.
+ *
+ * Net effect: while the main window is hidden/destroyed there's no "other
+ * Space" for the OS to yank toward during HUD drags / notification clicks.
+ * This is the same pattern V1 uses for its Control Panel.
+ */
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 480,
@@ -338,7 +352,20 @@ function createMainWindow(): BrowserWindow {
   } else {
     void win.loadFile(MAIN_HTML);
   }
-  win.once('ready-to-show', () => showMainWindowOnCurrentSpace(win));
+  win.once('ready-to-show', () => {
+    // Bring the Dock icon visible alongside the main window — V1 toggles
+    // these in lockstep so "has main window" == "has Dock icon".
+    if (process.platform === 'darwin') app.dock?.show();
+    showMainWindowOnCurrentSpace(win);
+  });
+  win.on('closed', () => {
+    mainWindow = null;
+    // Hide the Dock icon once the main window is gone — the app falls back
+    // to tray-only access. Combined with the destroyed window, this removes
+    // the "main window in another Space" target that the OS would otherwise
+    // yank the user to on any app activation (HUD drag, notification click).
+    if (process.platform === 'darwin') app.dock?.hide();
+  });
   return win;
 }
 
@@ -1220,7 +1247,7 @@ app.whenReady().then(() => {
   // a top-level function in this file, hoisted, so order doesn't matter
   // for the reference itself). Tray construction is no-op on platforms
   // where it isn't supported.
-  tray = new TrayManager({ onOpenHome: () => openHome() });
+  tray = new TrayManager({ onOpenHome: () => openHome(), logger: composed.logger });
   tray.init();
 
   // We intentionally don't seed the HUD's failed state from past DB failures.
