@@ -406,7 +406,7 @@ class MicCapture : public Napi::ObjectWrap<MicCapture> {
     AudioComponentDescription desc = {
         kAudioUnitType_Output,
         kAudioUnitSubType_HALOutput,
-        kAudioUnitManufacturerApple,
+        kAudioUnitManufacturer_Apple,
         0, 0
     };
     AudioComponent comp = AudioComponentFindNext(nullptr, &desc);
@@ -820,7 +820,7 @@ static OSStatus DefaultDeviceChanged(AudioObjectID inObjectID,
     AudioComponentDescription desc = {
         kAudioUnitType_Output,
         kAudioUnitSubType_HALOutput,
-        kAudioUnitManufacturerApple, 0, 0
+        kAudioUnitManufacturer_Apple, 0, 0
     };
     AudioComponent comp = AudioComponentFindNext(nullptr, &desc);
     AudioUnit unit = nullptr;
