@@ -14,10 +14,11 @@
  *   handleAudioMessage(msg)  — wired by AudioProcessLink.on
  *
  * Internal driver:
- *   chunkRotationTimer fires every `mode.chunkRotationIntervalMs()`; on each
- *   tick we close the current chunk and open the next one. The audio-process
- *   handles the 2 s overlap-tail by replaying its rolling buffer when we send
- *   `open_chunk` with `overlapPrefixMs=2000`.
+ *   The audio-process emits `rotation_due` once the current chunk has
+ *   accumulated `chunkRotationIntervalMs()` of NEW audio (overlap prepend
+ *   excluded), measured on the audio clock — not wall-clock. We respond by
+ *   closing the current chunk and opening the next one with a 2 s
+ *   overlap-prefix, which the audio-process populates from its rolling tail.
  *
  * Crash safety: every state change persists through JobStore before any user
  * acknowledgement. A killed process at any point leaves recoverable rows
@@ -53,12 +54,6 @@ export interface RecordingOrchestratorDeps {
   readonly link: AudioProcessLink;
   readonly clock: Clock;
   readonly logger?: Logger;
-  /**
-   * Returns the user-configured mic device UID (from settings), or null to
-   * use the system default. Called at session-start so changes in Settings
-   * take effect on the *next* recording without restarting the app.
-   */
-  readonly getMicDeviceId?: () => string | null;
 }
 
 interface ActiveSession {
@@ -70,7 +65,14 @@ interface ActiveSession {
   /** The chunk currently open in audio-process (and ChunkWriter). */
   currentChunkId: string;
   currentChunkStartMs: number;
-  rotationTimer: NodeJS.Timeout | null;
+  /**
+   * Overlap-prefix that was prepended to the current chunk's file. Needed so
+   * tickRotation can compute the true end-of-new-content for this chunk —
+   * `endMs = currentChunkStartMs + currentChunkOverlapMs + new-audio-target`.
+   * Without this, every chunk after the first would drift 2 s earlier than
+   * the audio-clock-driven rotation actually fires.
+   */
+  currentChunkOverlapMs: number;
 }
 
 export class RecordingOrchestrator {
@@ -91,8 +93,6 @@ export class RecordingOrchestrator {
    */
   private pendingDeviceBoundary = false;
 
-  private readonly getMicDeviceId: (() => string | null) | undefined;
-
   /** Construct with deps; subscribes to AudioProcessLink for audio events. */
   constructor(deps: RecordingOrchestratorDeps) {
     this.store = deps.store;
@@ -100,7 +100,6 @@ export class RecordingOrchestrator {
     this.link = deps.link;
     this.clock = deps.clock;
     this.logger = deps.logger ?? noopLogger;
-    this.getMicDeviceId = deps.getMicDeviceId;
     this.link.on((msg) => this.handleAudioMessage(msg));
   }
 
@@ -172,11 +171,6 @@ export class RecordingOrchestrator {
     this.setState('stopping');
     const a = this.active;
 
-    if (a.rotationTimer) {
-      clearInterval(a.rotationTimer);
-      a.rotationTimer = null;
-    }
-
     // Send close_chunk; audio-process will reply with chunk_closed which the
     // handler below routes to ChunkWriter.closeChunk. Send stop_session after
     // so audio-process tears down capture sources cleanly.
@@ -206,10 +200,6 @@ export class RecordingOrchestrator {
     if (!this.active) return;
     const a = this.active;
     this.setState('stopping');
-    if (a.rotationTimer) {
-      clearInterval(a.rotationTimer);
-      a.rotationTimer = null;
-    }
     // Tear down audio-process capture; no close_chunk because we're discarding
     // the chunk locally rather than persisting it.
     this.link.send({ type: 'stop_session' });
@@ -237,10 +227,6 @@ export class RecordingOrchestrator {
     this.setState('stopping');
     const a = this.active;
 
-    if (a.rotationTimer) {
-      clearInterval(a.rotationTimer);
-      a.rotationTimer = null;
-    }
     const endMs = this.clock.now() - a.startedAt;
     this.link.send({ type: 'close_chunk', chunkId: a.currentChunkId, endMs });
     this.link.send({ type: 'stop_session' });
@@ -300,6 +286,14 @@ export class RecordingOrchestrator {
         // Passed through by main.ts directly to the HUD via a push channel;
         // the orchestrator doesn't need it for FSM state.
         return;
+      case 'rotation_due':
+        // Audio-clock-driven chunk rotation: the audio-process tells us the
+        // current chunk has accumulated CHUNK_NEW_AUDIO_MS of new audio (not
+        // counting overlap prepend). We respond with the standard
+        // close + open dance. Replaces the old wall-clock setInterval, which
+        // produced 29/31/28 s chunks under scheduler jitter or BT gaps.
+        if (this.active?.behavior.enableChunkRotation) this.tickRotation();
+        return;
     }
   }
 
@@ -325,14 +319,12 @@ export class RecordingOrchestrator {
       title,
     });
 
-    const micDeviceId = this.getMicDeviceId?.() ?? null;
     this.link.send({
       type: 'start_session',
       sessionId,
       mode,
       enableSystemAudio: behavior.enableSystemAudio,
       sampleRate: 16_000,
-      ...(micDeviceId ? { micDeviceId } : {}),
     });
 
     const chunkId = randomUUID();
@@ -362,16 +354,8 @@ export class RecordingOrchestrator {
       chunkIdx: 0,
       currentChunkId: chunkId,
       currentChunkStartMs: chunkStartMs,
-      rotationTimer: null,
+      currentChunkOverlapMs: 0,
     };
-    if (behavior.enableChunkRotation) {
-      // setInterval keeps the event loop alive; in tests the orchestrator's
-      // `tickRotation()` is also exposed for deterministic stepping.
-      this.active.rotationTimer = setInterval(
-        () => this.tickRotation(),
-        behavior.chunkRotationIntervalMs(),
-      );
-    }
     this.setState('recording');
     this.logger.info('session started', { sessionId, mode });
     return sessionId;
@@ -379,7 +363,8 @@ export class RecordingOrchestrator {
 
   /**
    * Close the current chunk and open the next one. Public for tests; production
-   * triggers it through the rotation timer.
+   * triggers it from the `rotation_due` message emitted by the audio-process
+   * once a chunk has accumulated `chunkRotationIntervalMs()` of new audio.
    */
   tickRotation(): void {
     if (!this.active || this.stateInternal !== 'recording') return;
@@ -390,7 +375,14 @@ export class RecordingOrchestrator {
       return;
     }
 
-    const endMs = a.currentChunkStartMs + a.behavior.chunkRotationIntervalMs();
+    // True end of NEW audio for the current chunk:
+    //   startMs of chunk + overlap that was prepended at its open + the
+    //   chunkRotationIntervalMs() worth of fresh content the audio-process
+    //   accumulated before emitting `rotation_due`. The previous version
+    //   omitted `currentChunkOverlapMs`, which drifted every chunk after the
+    //   first two seconds earlier than the timeline displayed in the HUD.
+    const endMs =
+      a.currentChunkStartMs + a.currentChunkOverlapMs + a.behavior.chunkRotationIntervalMs();
     this.link.send({ type: 'close_chunk', chunkId: a.currentChunkId, endMs });
     // audio-process replies with chunk_closed; we open the next chunk eagerly
     // here so the open_chunk message arrives in order. The 2 s overlap is
@@ -422,6 +414,7 @@ export class RecordingOrchestrator {
     a.chunkIdx = nextIdx;
     a.currentChunkId = nextChunkId;
     a.currentChunkStartMs = nextStartMs;
+    a.currentChunkOverlapMs = overlap;
   }
 
   /**

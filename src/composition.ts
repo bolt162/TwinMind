@@ -194,9 +194,6 @@ export function compose({ audioLink, platform, appVersion }: ComposeInput): Comp
     link: audioLink,
     clock: SystemClock,
     logger,
-    // Re-read settings at every session start so the picker in Settings
-    // takes effect on the next recording without an app restart.
-    getMicDeviceId: () => settings.load().settings.recording.inputDeviceId,
   });
   orchestrator.on('state_changed', (s) => {
     if (s.state === 'recording') {

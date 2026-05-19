@@ -174,7 +174,13 @@ function EditableTitle({
 function TranscriptList({
   items,
 }: {
-  items: ReadonlyArray<{ chunkId: string; startMs: number; endMs: number; text: string }>;
+  items: ReadonlyArray<{
+    chunkId: string;
+    startMs: number;
+    endMs: number;
+    overlapPrefixMs: number;
+    text: string;
+  }>;
 }) {
   if (items.length === 0) {
     return (
@@ -185,14 +191,28 @@ function TranscriptList({
   }
   return (
     <ol className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
-      {items.map((t) => (
-        <li key={t.chunkId} className="flex gap-3">
-          <span className="shrink-0 font-mono text-xs text-zinc-500">
-            {formatTimestamp(t.startMs)}
-          </span>
-          <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
-        </li>
-      ))}
+      {items.map((t, i) => {
+        // Display the *new-content* range, hiding the 2 s overlap prepend so
+        // adjacent chunks render as a clean 0:00–0:30 / 0:30–1:00 sequence.
+        const displayStart = t.startMs + t.overlapPrefixMs;
+        // Use the next chunk's display-start as this chunk's display-end so
+        // rows always touch exactly. Each WAV's stored end_ms drifts a few
+        // tens of ms from the architectural 32 s target (mixer frame
+        // boundaries + close_chunk round-trip), which `Math.floor` in
+        // formatTimestamp can magnify into a visible 1 s gap. Only the final
+        // chunk falls back to its real end_ms — it has no successor and is
+        // legitimately short (user stopped mid-window).
+        const next = items[i + 1];
+        const displayEnd = next ? next.startMs + next.overlapPrefixMs : t.endMs;
+        return (
+          <li key={t.chunkId} className="flex gap-3">
+            <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
+              {formatTimestamp(displayStart)} – {formatTimestamp(displayEnd)}
+            </span>
+            <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
+          </li>
+        );
+      })}
     </ol>
   );
 }

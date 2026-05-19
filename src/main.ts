@@ -1145,7 +1145,10 @@ app.whenReady().then(() => {
       // Push to the HUD only — main window doesn't need 10 Hz updates.
       if (hud && bridge) {
         try {
-          bridge.broadcast(hud.webContents(), PUSH.AMPLITUDE_SAMPLE, { value: msg.value });
+          bridge.broadcast(hud.webContents(), PUSH.AMPLITUDE_SAMPLE, {
+            value: msg.value,
+            audioClockMs: msg.audioClockMs,
+          });
         } catch {
           /* HUD torn down between emit and broadcast */
         }

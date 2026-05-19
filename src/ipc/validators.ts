@@ -69,6 +69,7 @@ const meetingDetected = z.object({
 const amplitudeSample = z.object({
   // Allow a hair of slack on the upper bound (saturation isn't a panic).
   value: z.number().min(0).max(1.001),
+  audioClockMs: z.number().int().nonnegative(),
 });
 
 const transcriptionUiState = z.discriminatedUnion('kind', [
@@ -175,6 +176,7 @@ const sessionGetOutput = sessionListItem.extend({
       chunkId: z.string().min(1).max(64),
       startMs: z.number().int().nonnegative(),
       endMs: z.number().int().nonnegative(),
+      overlapPrefixMs: z.number().int().nonnegative(),
       text: z.string().max(64_000),
     }),
   ),
@@ -206,6 +208,7 @@ const dictationListOutput = z.object({
             chunkId: z.string().min(1).max(64),
             startMs: z.number().int().nonnegative(),
             endMs: z.number().int().nonnegative(),
+            overlapPrefixMs: z.number().int().nonnegative(),
             text: z.string().max(64_000),
           }),
         ),

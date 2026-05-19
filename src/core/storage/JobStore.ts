@@ -220,6 +220,7 @@ export class JobStore {
       readonly chunkId: string;
       readonly startMs: number;
       readonly endMs: number;
+      readonly overlapPrefixMs: number;
       readonly text: string;
     }>;
   }> {
@@ -231,6 +232,7 @@ export class JobStore {
         chunk_id: string;
         start_ms: number;
         end_ms: number;
+        overlap_prefix_ms: number;
         text: string;
       }>;
       return {
@@ -243,6 +245,7 @@ export class JobStore {
           chunkId: r.chunk_id,
           startMs: r.start_ms,
           endMs: r.end_ms,
+          overlapPrefixMs: r.overlap_prefix_ms,
           text: r.text,
         })),
       };
@@ -292,6 +295,7 @@ export class JobStore {
       readonly chunkId: string;
       readonly startMs: number;
       readonly endMs: number;
+      readonly overlapPrefixMs: number;
       readonly text: string;
     }>;
   } | null {
@@ -301,6 +305,7 @@ export class JobStore {
       chunk_id: string;
       start_ms: number;
       end_ms: number;
+      overlap_prefix_ms: number;
       text: string;
     }>;
     return {
@@ -309,6 +314,7 @@ export class JobStore {
         chunkId: r.chunk_id,
         startMs: r.start_ms,
         endMs: r.end_ms,
+        overlapPrefixMs: r.overlap_prefix_ms,
         text: r.text,
       })),
     };
@@ -779,7 +785,11 @@ export class JobStore {
       `),
       getTranscript: this.db.prepare(`SELECT * FROM transcripts WHERE chunk_id=@chunk_id`),
       listTranscriptsForSession: this.db.prepare(`
-        SELECT t.chunk_id AS chunk_id, c.start_ms AS start_ms, c.end_ms AS end_ms, t.text AS text
+        SELECT t.chunk_id AS chunk_id,
+               c.start_ms AS start_ms,
+               c.end_ms AS end_ms,
+               c.overlap_prefix_ms AS overlap_prefix_ms,
+               t.text AS text
         FROM transcripts t
         JOIN chunks c ON c.id = t.chunk_id
         WHERE c.session_id = @session_id

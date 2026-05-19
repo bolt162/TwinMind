@@ -67,11 +67,38 @@ export class AudioGraph {
   private micUnsubs: Array<() => void> = [];
   /**
    * Start options used for the current mic — replayed on rebind so the new
-   * engine instance picks up the same sample rate / channels / device.
+   * engine instance picks up the same sample rate / channels.
    */
-  private micStartOpts: { sampleRate: number; channels: 1; deviceId?: string } | null = null;
+  private micStartOpts: { sampleRate: number; channels: 1 } | null = null;
   /** Coalesces back-to-back device_change events; only the last wins. */
   private rebindDebounceTimer: NodeJS.Timeout | null = null;
+  /**
+   * Cumulative count of mixed mono int16 samples emitted since session
+   * start. Used to compute the `audioClockMs` field on amplitude_sample —
+   * the HUD takes that as the authoritative recording-elapsed timer
+   * instead of wall-clock, so a Bluetooth gap or stalled capture freezes
+   * the timer alongside the waveform.
+   */
+  private samplesEmitted = 0;
+  /** Sample rate the current session was started with. */
+  private sessionSampleRate = 16000;
+  /**
+   * Session audio-clock at the moment the current chunk opened — i.e., the
+   * value of `samplesEmitted / sampleRate * 1000` *before* any of this chunk's
+   * frames were counted. Used to drive audio-clock-aligned chunk rotation:
+   * when (currentSessionAudioClock − chunkAudioClockAtOpen) crosses
+   * `CHUNK_NEW_AUDIO_MS`, we tell main it's time to rotate. That guarantees
+   * each chunk holds exactly 30 s of new audio (the overlap prepend is
+   * additional and doesn't count toward the threshold).
+   */
+  private chunkAudioClockAtOpen = 0;
+  /**
+   * One-shot guard: once `rotation_due` has been sent for the current chunk,
+   * don't send it again until the next `openChunk`. Without this, every
+   * subsequent emitted frame would re-fire while main is in the round-trip
+   * to send `close_chunk` back.
+   */
+  private rotationDueSent = false;
   /** Re-entry guard for rebindMic; also blocks self-triggered loops. */
   private rebindInFlight = false;
   /**
@@ -98,6 +125,13 @@ export class AudioGraph {
    */
   private pendingCrossfade: Int16Array | null = null;
   private static readonly CROSSFADE_SAMPLES = 80; // 5 ms @ 16 kHz
+  /**
+   * The architectural target for new audio per chunk. When the current chunk
+   * has accumulated this much audio since `openChunk` (measured in session
+   * audio-clock, not wall-clock), we fire `rotation_due` to main. Total file
+   * for a meeting chunk is then 30 s new + 2 s overlap = 32 s.
+   */
+  private static readonly CHUNK_NEW_AUDIO_MS = 30_000;
 
   /** Software AGC applied to mic frames pre-mixer. Re-created on every
    *  startSession so state doesn't leak across recordings. Quiet voice
@@ -121,11 +155,12 @@ export class AudioGraph {
     this.mixer = new Mixer(msg.mode, DEFAULT_MIXER_CONFIG);
     this.micAgc = new SoftwareAgc();
     this.firstMicFrameSeen = false;
+    this.samplesEmitted = 0;
+    this.sessionSampleRate = msg.sampleRate;
 
     this.micStartOpts = {
       sampleRate: msg.sampleRate,
       channels: 1,
-      ...(msg.micDeviceId ? { deviceId: msg.micDeviceId } : {}),
     };
     this.attachMicListeners();
     await this.mic.start(this.micStartOpts);
@@ -247,6 +282,12 @@ export class AudioGraph {
     this.cursorMs = msg.startMs;
     this.mixer.resetStats();
     this.pendingCrossfade = null;
+    // Snapshot the session audio-clock so we can decide later when this chunk
+    // has accumulated CHUNK_NEW_AUDIO_MS of new content. The overlap prepend
+    // (handled below) doesn't count — it's audio already emitted into the
+    // previous chunk's tail, not new capture.
+    this.chunkAudioClockAtOpen = (this.samplesEmitted / this.sessionSampleRate) * 1000;
+    this.rotationDueSent = false;
 
     if (msg.overlapPrefixMs > 0 && this.overlapTail.length > 0) {
       const overlapFrames = takeTail(this.overlapTail, msToSamples(msg.overlapPrefixMs));
@@ -338,10 +379,35 @@ export class AudioGraph {
       const mixed = this.applyCrossfade(raw);
       this.appendToTail(mixed);
       if (this.currentChunkId) this.emitFrame(mixed);
+      // Advance the audio clock by exactly the number of mono samples we
+      // actually emitted. If capture stalls (Bluetooth HFP renegotiation,
+      // device unplug), this clock freezes — which is the point. The HUD
+      // reads it as the authoritative recording-elapsed timer.
+      this.samplesEmitted += mixed.length;
       // Live-meter sample for the HUD. Cheap (one pass over ~1600 int16s
       // every 100 ms) and decoupled from the chunk-close stats so the meter
       // updates 10× per second instead of once per chunk.
-      this.send({ type: 'amplitude_sample', value: rmsNormalized(mixed) });
+      const audioClockMs = Math.round((this.samplesEmitted / this.sessionSampleRate) * 1000);
+      this.send({
+        type: 'amplitude_sample',
+        value: rmsNormalized(mixed),
+        audioClockMs,
+      });
+      // Audio-clock-driven chunk rotation. When this chunk has had
+      // CHUNK_NEW_AUDIO_MS of new audio (not counting the prepended overlap,
+      // which was already counted in the previous chunk), tell main it's
+      // time to close + open the next. Idempotent within a chunk via
+      // rotationDueSent — only the first qualifying frame fires it, the
+      // remainder of in-flight frames slot into this chunk while main's
+      // close_chunk message makes its way back.
+      if (
+        !this.rotationDueSent &&
+        this.currentChunkId &&
+        audioClockMs - this.chunkAudioClockAtOpen >= AudioGraph.CHUNK_NEW_AUDIO_MS
+      ) {
+        this.rotationDueSent = true;
+        this.send({ type: 'rotation_due' });
+      }
     }
   }
 

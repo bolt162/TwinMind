@@ -151,7 +151,15 @@ export function HudApp() {
     };
   }, []);
 
-  // ─── Amplitude rolling buffer for the recording-mode waveform ───────────
+  // ─── Amplitude rolling buffer + audio-clock-driven timer ────────────────
+  //
+  // amplitudeSample carries two things:
+  //  - `value`: the RMS bar to plot
+  //  - `audioClockMs`: cumulative samples-processed since session start.
+  //    We use this as the authoritative recording-elapsed timer. If capture
+  //    stalls (Bluetooth HFP renegotiation, device unplug), the clock
+  //    freezes alongside the waveform — the user sees something is wrong
+  //    instead of being told "60s recorded" when only 53s of audio existed.
   const barsRef = useRef<number[]>(new Array(BAR_COUNT).fill(0));
   const [, force] = useState(0);
   useEffect(() => {
@@ -159,28 +167,19 @@ export function HudApp() {
       const bars = barsRef.current;
       for (let i = 0; i < BAR_COUNT - 1; i++) bars[i] = bars[i + 1]! * DECAY;
       bars[BAR_COUNT - 1] = e.value;
+      setElapsedSec(Math.floor(e.audioClockMs / 1000));
       force((n) => (n + 1) & 0x7fff_ffff);
     });
     return () => unsub();
   }, []);
 
-  // ─── Recording elapsed timer (local clock, no main pushes) ──────────────
-  const recordingStartedAt = useRef<number | null>(null);
+  // Drain the bar buffer + reset elapsed when leaving recording. We don't
+  // need a separate wall-clock timer — `audioClockMs` from the audio
+  // process drives elapsedSec while recording.
   useEffect(() => {
-    if (recording === 'recording') {
-      if (recordingStartedAt.current === null) {
-        recordingStartedAt.current = Date.now();
-        setElapsedSec(0);
-      }
-      const t = setInterval(() => {
-        if (recordingStartedAt.current !== null) {
-          setElapsedSec(Math.floor((Date.now() - recordingStartedAt.current) / 1000));
-        }
-      }, 500);
-      return () => clearInterval(t);
+    if (recording !== 'recording') {
+      setElapsedSec(0);
     }
-    recordingStartedAt.current = null;
-    setElapsedSec(0);
   }, [recording]);
 
   // Drain the live waveform when not recording so the next session starts clean.
@@ -503,7 +502,7 @@ function Waveform({ bars }: { bars: readonly number[] }) {
         return (
           <span
             key={i}
-            className="inline-block w-[2px] rounded-full bg-white/85"
+            className="inline-block w-[2px] rounded-full bg-white/85 transition-[height] duration-100 ease-out"
             style={{ height: `${px}px` }}
           />
         );

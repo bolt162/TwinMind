@@ -123,6 +123,12 @@ export interface MeetingDetected {
 export interface AmplitudeSample {
   /** Normalized RMS, 0..1. */
   readonly value: number;
+  /**
+   * Cumulative audio-clock since session start, in ms. The HUD uses this
+   * as the authoritative elapsed timer — drops to "stuck" when capture
+   * stalls (Bluetooth profile switch, device unplug). Strictly monotonic.
+   */
+  readonly audioClockMs: number;
 }
 
 /**
@@ -251,8 +257,11 @@ export interface SessionGetInput {
 export interface SessionGetOutput extends SessionListItem {
   readonly transcripts: ReadonlyArray<{
     readonly chunkId: string;
+    /** Raw chunk start, including any 2 s overlap-prefix (file-time, not new-content-time). */
     readonly startMs: number;
     readonly endMs: number;
+    /** Length of the 2 s overlap prepended at the start of this chunk; 0 for chunk 0 / dictation. */
+    readonly overlapPrefixMs: number;
     readonly text: string;
   }>;
 }
@@ -392,6 +401,7 @@ export interface RequestPayloads {
           readonly chunkId: string;
           readonly startMs: number;
           readonly endMs: number;
+          readonly overlapPrefixMs: number;
           readonly text: string;
         }>;
       }>;

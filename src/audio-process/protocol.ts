@@ -33,14 +33,6 @@ export interface StartSessionMsg {
   readonly enableSystemAudio: boolean;
   /** 16 000 for V2; configurable for future. */
   readonly sampleRate: number;
-  /**
-   * Optional CoreAudio device UID. When set, audio-process binds the mic
-   * capture to this specific device; when omitted or unresolvable, the
-   * capture falls back to the current system default. Used by the
-   * "Recording input device" picker in Settings — null/undefined means
-   * "follow system default" (which is what most users want).
-   */
-  readonly micDeviceId?: string;
 }
 
 /** Stop capture; finalize anything pending; do not emit further pcm_frames. */
@@ -87,6 +79,7 @@ export type AudioToMain =
   | DeviceChangeMsg
   | MicReboundMsg
   | CaptureErrorMsg
+  | RotationDueMsg
   | ReadyMsg;
 
 /** Emitted on every audio-thread tick (~100 ms of PCM). */
@@ -121,6 +114,14 @@ export interface AmplitudeSampleMsg {
   readonly type: 'amplitude_sample';
   /** RMS of the most recent frame, normalized to [0, 1]. */
   readonly value: number;
+  /**
+   * Cumulative audio-clock since session start, in milliseconds — `samples
+   * processed / sample_rate * 1000`. The HUD uses this as the authoritative
+   * elapsed timer instead of wall-clock, so a Bluetooth gap (or any capture
+   * stall) freezes the timer alongside the waveform. Strictly monotonic
+   * within a session.
+   */
+  readonly audioClockMs: number;
 }
 
 /** Bluetooth route change, default-device flip, etc. (§7.7) */
@@ -139,6 +140,18 @@ export interface DeviceChangeMsg {
  */
 export interface MicReboundMsg {
   readonly type: 'mic_rebound';
+}
+
+/**
+ * Audio-process-side signal that the current chunk has accumulated the
+ * architectural target of *new* audio (excluding any overlap prepend). Main
+ * responds by sending the standard `close_chunk` + `open_chunk` pair. This
+ * replaces the old wall-clock `setInterval` rotation in the orchestrator —
+ * with this, chunks are always exactly 30 s of new audio long, regardless
+ * of scheduler jitter or capture stalls.
+ */
+export interface RotationDueMsg {
+  readonly type: 'rotation_due';
 }
 
 /** Non-recoverable error from one of the capture sources. */
