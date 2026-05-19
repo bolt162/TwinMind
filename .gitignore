@@ -34,3 +34,6 @@ native/**/prebuilds/
 # resources
 resources/bin/macos-globe-listener
 resources/bin/.swift-module-cache/
+
+# personal handoff notes between sessions — not part of the repo
+HANDOFF.md
