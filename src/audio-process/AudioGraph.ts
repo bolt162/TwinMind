@@ -98,6 +98,24 @@ export class AudioGraph {
   private firstMicFrameSeen = false;
 
   /**
+   * Stall silence-fill state. While a session is active, a 100 ms wall-clock
+   * timer checks whether any real PCM has arrived recently. If the gap
+   * exceeds STALL_THRESHOLD_MS (typical native rebind window starts here),
+   * we inject synthetic zero PCM at sample rate via emitFrame — this keeps
+   * audio-clock = wall-clock, the HUD timer + waveform keep animating, and
+   * any chunk that contains the stall stays the architecturally-correct
+   * length (the silence reflects "this is what reached us during the gap").
+   * Bounded by MAX_CONSECUTIVE_SILENCE_FILL_MS so a true hard failure
+   * eventually stops self-padding and surfaces as audible silence.
+   */
+  private static readonly STALL_THRESHOLD_MS = 100;
+  private static readonly SILENCE_FILL_INTERVAL_MS = 100;
+  private static readonly MAX_CONSECUTIVE_SILENCE_FILL_MS = 5_000;
+  private lastRealPcmAtMs = 0;
+  private consecutiveSilenceMs = 0;
+  private silenceFillTimer: NodeJS.Timeout | null = null;
+
+  /**
    * Held-back tail of the prepended overlap (last `CROSSFADE_SAMPLES` samples).
    * Consumed by the first mixer-emitted frame after openChunk: the new frame's
    * head is linearly blended against this tail, smoothing the (already-
@@ -142,6 +160,14 @@ export class AudioGraph {
     this.firstMicFrameSeen = false;
     this.samplesEmitted = 0;
     this.sessionSampleRate = msg.sampleRate;
+    this.lastRealPcmAtMs = Date.now();
+    this.consecutiveSilenceMs = 0;
+    // 100 ms watchdog: paints over native rebind gaps + brief device hiccups
+    // so the HUD timer + waveform never freeze. See onStallTick for details.
+    this.silenceFillTimer = setInterval(
+      () => this.onStallTick(),
+      AudioGraph.SILENCE_FILL_INTERVAL_MS,
+    );
 
     this.attachMicListeners();
     await this.mic.start({
@@ -187,6 +213,10 @@ export class AudioGraph {
 
   /** Detach listeners, stop sources, drop any queued data. */
   async stopSession(): Promise<void> {
+    if (this.silenceFillTimer) {
+      clearInterval(this.silenceFillTimer);
+      this.silenceFillTimer = null;
+    }
     for (const u of this.micUnsubs) u();
     this.micUnsubs = [];
     for (const u of this.unsubs) u();
@@ -297,6 +327,27 @@ export class AudioGraph {
     }
     const partial = this.mixer.flush();
     if (partial) this.emitFrame(this.applyCrossfade(partial));
+
+    // Pad with silence so the chunk's WAV duration matches the orchestrator's
+    // target endMs *exactly*. Without this, mixer framing + message-roundtrip
+    // jitter leaves chunks at 29 980–30 060 ms — borderline values that
+    // `Math.floor(ms / 1000)` flips to "0:29" instead of "0:30" in the UI.
+    // With this, every chunk lands on its target millisecond, so the
+    // transcript list shows 00:00–00:30 / 00:30–01:00 / 01:00–01:30 always.
+    // We pad rather than truncate because the WAV file is already written —
+    // appending zero PCM is cheap; rewriting isn't. Capped at 2000 ms as a
+    // sanity bound in case the orchestrator ever sends a wildly out-of-range
+    // endMs; in steady state the pad is 0–100 ms.
+    const targetMs = msg.endMs - this.chunkStartMs;
+    const actualMs = this.cursorMs - this.chunkStartMs;
+    const padMs = Math.min(2000, Math.max(0, targetMs - actualMs));
+    if (padMs > 0) {
+      const padSamples = msToSamples(padMs);
+      if (padSamples > 0) {
+        this.emitFrame(new Int16Array(padSamples));
+      }
+    }
+
     const stats = this.mixer.stats();
     this.send({
       type: 'chunk_closed',
@@ -320,6 +371,12 @@ export class AudioGraph {
   private onMicFrame(buf: Buffer): void {
     if (!this.mixer) return;
     this.firstMicFrameSeen = true;
+    // Real PCM heartbeat — feeds the stall watchdog. Resetting
+    // consecutiveSilenceMs here means a brief return-of-frames after a stall
+    // re-arms the watchdog for the next stall (it doesn't count toward the
+    // 5 s safety cap).
+    this.lastRealPcmAtMs = Date.now();
+    this.consecutiveSilenceMs = 0;
     // AGC before the mixer: boost quiet mic toward -20 dBFS so it can compete
     // with system audio. Without this, V2's raw AVAudioEngine capture stays at
     // whatever the OS input level happens to be, and quiet voice loses the mix.
@@ -357,6 +414,54 @@ export class AudioGraph {
         this.rotationDueSent = true;
         this.send({ type: 'rotation_due' });
       }
+    }
+  }
+
+  /**
+   * Wall-clock tick (100 ms cadence) that paints over native capture stalls
+   * by emitting synthetic zero PCM directly into the WAV stream.
+   *
+   * Reads `lastRealPcmAtMs`; if no real frame for >STALL_THRESHOLD_MS, emits
+   * one SILENCE_FILL_INTERVAL_MS frame of silence per tick — keeping
+   * `samplesEmitted` advancing at sample rate, the HUD timer ticking, the
+   * waveform animating (with zero bars), and chunk lengths matching their
+   * architectural targets. Bounded by MAX_CONSECUTIVE_SILENCE_FILL_MS so a
+   * genuine hard failure eventually stops self-painting and surfaces.
+   *
+   * Bypasses the mixer intentionally — pushing silence through the mixer
+   * would shift its framing offset relative to real frames, producing
+   * audible glitches when real PCM resumes. Direct emitFrame writes to the
+   * WAV without touching mixer state.
+   */
+  private onStallTick(): void {
+    if (!this.mixer) return;
+    if (!this.currentChunkId) return; // no active chunk; nothing to pad
+    const elapsed = Date.now() - this.lastRealPcmAtMs;
+    if (elapsed < AudioGraph.STALL_THRESHOLD_MS) return;
+    if (this.consecutiveSilenceMs >= AudioGraph.MAX_CONSECUTIVE_SILENCE_FILL_MS) return;
+
+    const samples = msToSamples(AudioGraph.SILENCE_FILL_INTERVAL_MS);
+    const silence = new Int16Array(samples); // zero-filled by spec
+    this.emitFrame(silence);
+    this.appendToTail(silence);
+    this.samplesEmitted += samples;
+    this.consecutiveSilenceMs += AudioGraph.SILENCE_FILL_INTERVAL_MS;
+
+    const audioClockMs = Math.round(
+      (this.samplesEmitted / this.sessionSampleRate) * 1000,
+    );
+    this.send({ type: 'amplitude_sample', value: 0, audioClockMs });
+
+    // Stall coinciding with chunk boundary — still fire rotation_due so the
+    // next chunk opens on schedule. Without this, a stall that lands right
+    // at the 30 s mark would push rotation off forever.
+    if (
+      !this.rotationDueSent &&
+      this.currentChunkId &&
+      audioClockMs - this.chunkAudioClockAtOpen >= AudioGraph.CHUNK_NEW_AUDIO_MS
+    ) {
+      this.rotationDueSent = true;
+      this.send({ type: 'rotation_due' });
     }
   }
 

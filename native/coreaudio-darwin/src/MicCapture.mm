@@ -200,6 +200,18 @@ struct Ctx {
   AudioObjectID currentDeviceID = kAudioObjectUnknown;
   bool followingSystemDefault = false;
   bool defaultListenerInstalled = false;
+  /**
+   * For pinned mode (!followingSystemDefault): a property listener on the
+   * pinned device's `kAudioDevicePropertyDeviceIsAlive`. When the device
+   * goes away (BT off, USB unplug), the property flips to 0 and the listener
+   * fires — we emit 'device_disappeared' from there so the orchestrator can
+   * pause and prompt the user from the HUD. Detection via InputProc alone
+   * is unreliable: macOS often keeps the AudioUnit "running" with zero
+   * buffers, and may even fire the InputProc faster than real time while
+   * the device is gone — the "fast-track timer" symptom.
+   */
+  bool aliveListenerInstalled = false;
+  AudioObjectID aliveListenerDeviceID = kAudioObjectUnknown;
   std::atomic<bool> started{false};
 
   // Serial queue for property-listener-driven rebinds. CoreAudio property
@@ -219,6 +231,10 @@ static OSStatus DefaultDeviceChanged(AudioObjectID inObjectID,
                                      UInt32 inNumberAddresses,
                                      const AudioObjectPropertyAddress *inAddresses,
                                      void *inClientData);
+static OSStatus PinnedDeviceAliveChanged(AudioObjectID inObjectID,
+                                         UInt32 inNumberAddresses,
+                                         const AudioObjectPropertyAddress *inAddresses,
+                                         void *inClientData);
 
 class MicCapture : public Napi::ObjectWrap<MicCapture> {
  public:
@@ -340,7 +356,45 @@ class MicCapture : public Napi::ObjectWrap<MicCapture> {
           kAudioObjectSystemObject, &addr, DefaultDeviceChanged, ctx_);
       if (s == noErr) ctx_->defaultListenerInstalled = true;
     }
+    // Pinned: install the IsAlive listener on the specific device so we
+    // detect a disappearance even when AudioUnitRender keeps returning
+    // noErr-with-zero-buffers. See PinnedDeviceAliveChanged.
+    if (!ctx_->followingSystemDefault && !ctx_->aliveListenerInstalled) {
+      InstallAliveListener(deviceID);
+    }
     return env.Undefined();
+  }
+
+  // ─── Pinned-device IsAlive listener helpers ───────────────────────────
+
+  /** Subscribe to kAudioDevicePropertyDeviceIsAlive on the given device.
+   *  Idempotent — replaces any existing subscription. */
+  void InstallAliveListener(AudioObjectID deviceID) {
+    if (ctx_->aliveListenerInstalled) RemoveAliveListener();
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    OSStatus s = AudioObjectAddPropertyListener(
+        deviceID, &addr, PinnedDeviceAliveChanged, ctx_);
+    if (s == noErr) {
+      ctx_->aliveListenerInstalled = true;
+      ctx_->aliveListenerDeviceID = deviceID;
+    }
+  }
+
+  void RemoveAliveListener() {
+    if (!ctx_->aliveListenerInstalled) return;
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    AudioObjectRemovePropertyListener(
+        ctx_->aliveListenerDeviceID, &addr, PinnedDeviceAliveChanged, ctx_);
+    ctx_->aliveListenerInstalled = false;
+    ctx_->aliveListenerDeviceID = kAudioObjectUnknown;
   }
 
   /**
@@ -382,6 +436,12 @@ class MicCapture : public Napi::ObjectWrap<MicCapture> {
         AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &addr,
                                            DefaultDeviceChanged, ctx_);
         ctx_->defaultListenerInstalled = false;
+      }
+      // Toggle the IsAlive listener symmetrically.
+      if (nowFollowingDefault) {
+        RemoveAliveListener();
+      } else {
+        InstallAliveListener(newDeviceID);
       }
       ctx_->followingSystemDefault = nowFollowingDefault;
 
@@ -577,6 +637,7 @@ class MicCapture : public Napi::ObjectWrap<MicCapture> {
                                          DefaultDeviceChanged, ctx_);
       ctx_->defaultListenerInstalled = false;
     }
+    RemoveAliveListener();
     if (ctx_->auHal) {
       AudioOutputUnitStop(ctx_->auHal);
       AudioUnitUninitialize(ctx_->auHal);
@@ -915,6 +976,51 @@ static OSStatus DefaultDeviceChanged(AudioObjectID inObjectID,
       }
     }
   });
+  return noErr;
+}
+
+// ─── Pinned-device IsAlive listener ─────────────────────────────────────
+//
+// Fires when the pinned input device's IsAlive property flips — typically
+// to 0 when the device is removed (BT power off, USB unplug, AirPods out
+// of range past the reconnect window). We read the new value defensively
+// (the listener fires before the device is technically gone, sometimes),
+// confirm zero, and emit 'device_disappeared'. The orchestrator's
+// capture_error handler routes that message to pauseForDeviceLoss → HUD
+// shows the inline picker.
+//
+// Runs on a CoreAudio-internal thread; we read the property and emit the
+// JS-side error via TSFN.BlockingCall, both of which are thread-safe. We
+// do NOT touch the AudioUnit from here — that happens later, in
+// StopInternal, when the JS-side decides what to do.
+
+static OSStatus PinnedDeviceAliveChanged(AudioObjectID inObjectID,
+                                         UInt32 inNumberAddresses,
+                                         const AudioObjectPropertyAddress *inAddresses,
+                                         void *inClientData) {
+  (void)inNumberAddresses; (void)inAddresses;
+  Ctx *ctx = (Ctx *)inClientData;
+  if (!ctx) return noErr;
+  if (ctx->followingSystemDefault) return noErr; // not our problem in auto-detect
+
+  AudioObjectPropertyAddress addr = {
+      kAudioDevicePropertyDeviceIsAlive,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain
+  };
+  UInt32 isAlive = 0;
+  UInt32 sz = sizeof(isAlive);
+  OSStatus s = AudioObjectGetPropertyData(inObjectID, &addr, 0, nullptr, &sz, &isAlive);
+  // If the read failed, treat as not-alive (device probably already gone).
+  if (s != noErr) isAlive = 0;
+  if (isAlive != 0) return noErr; // benign property notification
+
+  if (ctx->onError) {
+    std::string msg = "device_disappeared";
+    ctx->onError.BlockingCall([msg](Napi::Env env, Napi::Function jsCallback) {
+      jsCallback.Call({Napi::String::New(env, msg)});
+    });
+  }
   return noErr;
 }
 
