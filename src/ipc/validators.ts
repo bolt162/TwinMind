@@ -98,15 +98,28 @@ const hotkeyCaptureKey = z.object({
   code: z.string().min(1).max(32),
 });
 
+const inputDeviceInfo = z.object({
+  id: z.string().min(1).max(256),
+  name: z.string().max(256),
+  isDefault: z.boolean(),
+  kind: z.enum(['built_in', 'bluetooth', 'usb', 'other']),
+});
+
 const recordingListInputDevicesOutput = z.object({
-  devices: z.array(
-    z.object({
-      id: z.string().min(1).max(256),
-      name: z.string().max(256),
-      isDefault: z.boolean(),
-      kind: z.enum(['built_in', 'bluetooth', 'usb', 'other']),
-    }),
-  ).max(64),
+  devices: z.array(inputDeviceInfo).max(64),
+});
+
+const micDeviceLost = z.object({
+  sessionId: z.string().min(1).max(64),
+  mode: z.enum(['dictation', 'meeting']),
+  lastDeviceLabel: z.string().max(256).nullable(),
+  reason: z.string().max(128),
+  devices: z.array(inputDeviceInfo).max(64),
+});
+
+const recordingResumeFromDeviceLossInput = z.object({
+  sessionId: z.string().min(1).max(64),
+  deviceId: z.string().max(256).nullable(),
 });
 
 /** Map of push channel → payload schema. Used by `bridge.main.broadcast()`. */
@@ -122,6 +135,7 @@ export const PushSchemas = {
   [PUSH.NAVIGATE_TAB]: navigateTab,
   [PUSH.HOTKEY_CHANGED]: hotkeyChanged,
   [PUSH.HOTKEY_CAPTURE_KEY]: hotkeyCaptureKey,
+  [PUSH.MIC_DEVICE_LOST]: micDeviceLost,
 } as const;
 
 // ─── REQUEST schemas (input + output per channel) ────────────────────────────
@@ -292,6 +306,7 @@ export const RequestSchemas = {
     output: recordingListInputDevicesOutput,
   },
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: hudSetMouseIgnoreInput, output: empty },
+  [REQUEST.REC_RESUME_FROM_DEVICE_LOSS]: { input: recordingResumeFromDeviceLossInput, output: empty },
 } as const;
 
 export type RequestChannelName = keyof typeof RequestSchemas;

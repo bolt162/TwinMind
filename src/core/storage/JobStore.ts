@@ -22,7 +22,11 @@ import type { Clock } from '@core/util/Clock';
 // ─── Row types (mirrors schema) ─────────────────────────────────────────────
 
 export type SessionMode = 'dictation' | 'meeting';
-export type SessionStatus = 'active' | 'ended' | 'paused_by_sleep';
+export type SessionStatus =
+  | 'active'
+  | 'ended'
+  | 'paused_by_sleep'
+  | 'paused_by_device_loss';
 export type ChunkSource = 'mic' | 'mixed';
 
 export interface SessionRow {
@@ -180,6 +184,24 @@ export class JobStore {
   markSessionPausedBySleep(id: string): void {
     const r = this.stmts.pauseSessionForSleep.run({ id });
     if (r.changes !== 1) throw new Error(`markSessionPausedBySleep: session ${id} not active`);
+  }
+
+  /** Mark a session as paused_by_device_loss; ended_at stays null. Same
+   *  shape as sleep-pause; resumable via `markSessionActive`. */
+  markSessionPausedByDeviceLoss(id: string): void {
+    const r = this.stmts.pauseSessionForDeviceLoss.run({ id });
+    if (r.changes !== 1) {
+      throw new Error(`markSessionPausedByDeviceLoss: session ${id} not active`);
+    }
+  }
+
+  /** Resume a paused session — flips status back to 'active'. Accepts either
+   *  paused_by_sleep or paused_by_device_loss as the starting state. */
+  markSessionActive(id: string): void {
+    const r = this.stmts.resumeSession.run({ id });
+    if (r.changes !== 1) {
+      throw new Error(`markSessionActive: session ${id} not in a paused state`);
+    }
   }
 
   /** Rename a session. Passing null clears the title (UI then falls back to
@@ -391,6 +413,19 @@ export class JobStore {
    */
   autoEndStaleSleepPaused(now: number, ageMs: number): number {
     const r = this.stmts.autoEndStaleSleepPaused.run({
+      now,
+      threshold: now - ageMs,
+    });
+    return r.changes;
+  }
+
+  /**
+   * Same as `autoEndStaleSleepPaused` but for `paused_by_device_loss` —
+   * sessions sitting paused because the pinned mic disappeared and the
+   * user never picked a replacement. Bounded by the same retention window.
+   */
+  autoEndStaleDeviceLossPaused(now: number, ageMs: number): number {
+    const r = this.stmts.autoEndStaleDeviceLossPaused.run({
       now,
       threshold: now - ageMs,
     });
@@ -664,6 +699,13 @@ export class JobStore {
       pauseSessionForSleep: this.db.prepare(`
         UPDATE sessions SET status='paused_by_sleep' WHERE id=@id AND status='active'
       `),
+      pauseSessionForDeviceLoss: this.db.prepare(`
+        UPDATE sessions SET status='paused_by_device_loss' WHERE id=@id AND status='active'
+      `),
+      resumeSession: this.db.prepare(`
+        UPDATE sessions SET status='active'
+        WHERE id=@id AND status IN ('paused_by_sleep','paused_by_device_loss')
+      `),
       updateSessionTitle: this.db.prepare(`
         UPDATE sessions SET title=@title WHERE id=@id
       `),
@@ -694,6 +736,11 @@ export class JobStore {
         UPDATE sessions
         SET status='ended', ended_at=@now, end_reason='sleep_timeout'
         WHERE status='paused_by_sleep' AND started_at < @threshold
+      `),
+      autoEndStaleDeviceLossPaused: this.db.prepare(`
+        UPDATE sessions
+        SET status='ended', ended_at=@now, end_reason='device_lost_timeout'
+        WHERE status='paused_by_device_loss' AND started_at < @threshold
       `),
 
       // ── chunks ──

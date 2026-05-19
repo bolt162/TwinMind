@@ -113,6 +113,8 @@ const electronAPI = {
   },
   recording_devices: {
     list: () => invoke(REQUEST.RECORDING_LIST_INPUT_DEVICES, {}),
+    resumeFromDeviceLoss: (input: RequestPayloads[typeof REQUEST.REC_RESUME_FROM_DEVICE_LOSS]['input']) =>
+      invoke(REQUEST.REC_RESUME_FROM_DEVICE_LOSS, input),
   },
   on: {
     recordingStateChanged: (cb: (e: PushPayloads[typeof PUSH.RECORDING_STATE]) => void) =>
@@ -140,6 +142,8 @@ const electronAPI = {
       subscribe(PUSH.HOTKEY_CHANGED, cb),
     hotkeyCaptureKey: (cb: (e: PushPayloads[typeof PUSH.HOTKEY_CAPTURE_KEY]) => void) =>
       subscribe(PUSH.HOTKEY_CAPTURE_KEY, cb),
+    micDeviceLost: (cb: (e: PushPayloads[typeof PUSH.MIC_DEVICE_LOST]) => void) =>
+      subscribe(PUSH.MIC_DEVICE_LOST, cb),
   },
 } as const;
 

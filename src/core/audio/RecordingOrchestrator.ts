@@ -271,6 +271,125 @@ export class RecordingOrchestrator {
     return sid;
   }
 
+  /**
+   * Sibling of `pauseForSleep` for the device-disappeared case: the user
+   * pinned a specific input device and that device went away (BT off, USB
+   * unplugged). Same shape — close chunk, tear down audio-process,
+   * mark the session row paused_by_device_loss. Emits a `device_lost`
+   * event so main can prompt the user from the HUD. Returns the sessionId.
+   */
+  pauseForDeviceLoss(reason: string = 'device_disappeared'): string | null {
+    if (!this.active || this.stateInternal !== 'recording') return null;
+    this.setState('stopping');
+    const a = this.active;
+
+    const endMs = this.clock.now() - a.startedAt;
+    this.link.send({ type: 'close_chunk', chunkId: a.currentChunkId, endMs });
+    this.link.send({ type: 'stop_session' });
+
+    try {
+      this.store.markSessionPausedByDeviceLoss(a.sessionId);
+    } catch (e) {
+      this.logger.warn('markSessionPausedByDeviceLoss failed', { err: String(e) });
+    }
+    this.logger.info('session paused by device loss', {
+      sessionId: a.sessionId,
+      reason,
+    });
+    const sid = a.sessionId;
+    const pausedMode = a.mode;
+    const pausedBehavior = a.behavior;
+    const pausedStartedAt = a.startedAt;
+    const pausedChunkIdx = a.chunkIdx;
+    this.active = null;
+    this.setState('idle');
+    // Stash enough state to resume; emit the event so main can drive the UI.
+    this.pendingResume = {
+      sessionId: sid,
+      mode: pausedMode,
+      behavior: pausedBehavior,
+      startedAt: pausedStartedAt,
+      chunkIdx: pausedChunkIdx,
+      reason,
+    };
+    this.emitter.emit('device_lost', { sessionId: sid, mode: pausedMode, reason });
+    return sid;
+  }
+
+  /**
+   * Resume a session that was paused by device loss. Caller passes the
+   * (possibly new) deviceId — null = follow system default. Re-issues
+   * start_session to audio-process with the new device, opens a fresh
+   * chunk marked `device_boundary=true`. Flips the session row back to
+   * 'active'.
+   */
+  resumeFromDeviceLoss(deviceId: string | null): string | null {
+    if (!this.pendingResume) return null;
+    if (this.stateInternal !== 'idle' || this.active) return null;
+    const p = this.pendingResume;
+    this.pendingResume = null;
+
+    this.setState('starting');
+    try {
+      this.store.markSessionActive(p.sessionId);
+    } catch (e) {
+      this.logger.warn('markSessionActive (resume) failed', { err: String(e) });
+    }
+    this.link.send({
+      type: 'start_session',
+      sessionId: p.sessionId,
+      mode: p.mode,
+      enableSystemAudio: p.behavior.enableSystemAudio,
+      sampleRate: 16_000,
+      ...(deviceId ? { micDeviceId: deviceId } : {}),
+    });
+
+    const chunkId = randomUUID();
+    const elapsed = this.clock.now() - p.startedAt;
+    const nextIdx = p.chunkIdx + 1;
+    this.chunkWriter.beginChunk({
+      chunkId,
+      sessionId: p.sessionId,
+      idx: nextIdx,
+      source: p.mode === 'dictation' ? 'mic' : 'mixed',
+      startMs: elapsed,
+      overlapPrefixMs: 0,
+      deviceBoundary: true,
+      sleepBoundary: false,
+    });
+    this.link.send({ type: 'open_chunk', chunkId, startMs: elapsed, overlapPrefixMs: 0 });
+
+    this.active = {
+      sessionId: p.sessionId,
+      mode: p.mode,
+      behavior: p.behavior,
+      startedAt: p.startedAt,
+      chunkIdx: nextIdx,
+      currentChunkId: chunkId,
+      currentChunkStartMs: elapsed,
+      currentChunkOverlapMs: 0,
+    };
+    this.setState('recording');
+    this.logger.info('session resumed after device loss', { sessionId: p.sessionId });
+    return p.sessionId;
+  }
+
+  /** Snapshot kept across pauseForDeviceLoss → resumeFromDeviceLoss so the
+   *  session can continue with the same id, mode, and chunk index. */
+  private pendingResume: {
+    sessionId: string;
+    mode: 'dictation' | 'meeting';
+    behavior: ModeBehavior;
+    startedAt: number;
+    chunkIdx: number;
+    reason: string;
+  } | null = null;
+
+  /** Subscribe to device-loss notifications (main wires the HUD to this). */
+  onDeviceLost(cb: (e: { sessionId: string; mode: 'dictation' | 'meeting'; reason: string }) => void): void {
+    this.emitter.on('device_lost', cb);
+  }
+
   // ─── Message routing from audio-process ──────────────────────────────────
 
   /**
@@ -303,8 +422,16 @@ export class RecordingOrchestrator {
         return;
       case 'capture_error':
         this.logger.error('capture error', { source: msg.source, message: msg.message });
-        // Don't auto-stop; a transient mic disconnect can recover via
-        // device_change. Stop only on user action or hard FSM failure.
+        // 'device_disappeared' is the native AUHAL signal for "pinned input
+        // device is gone" (BT off, USB unplug, etc.). Route to the pause
+        // path so the HUD can prompt the user to pick a replacement and
+        // resume — see Phase 6b in the BT-replan plan.
+        if (msg.source === 'mic' && msg.message === 'device_disappeared') {
+          this.pauseForDeviceLoss(msg.message);
+        }
+        // Other capture errors: don't auto-stop; a transient mic disconnect
+        // can recover via device_change. Stop only on user action or hard
+        // FSM failure.
         return;
       case 'ready':
         return;

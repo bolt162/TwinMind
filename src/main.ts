@@ -653,6 +653,23 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     hud?.setMouseIgnore(ignore);
     return {};
   });
+  b.handle(REQUEST.REC_RESUME_FROM_DEVICE_LOSS, ({ sessionId, deviceId }) => {
+    // Persist the user's pick (so the next session start uses it too) and
+    // resume the paused session with a fresh chunk marked device_boundary.
+    const current = c.settings.load().settings;
+    c.settings.save({
+      ...current,
+      recording: { ...current.recording, inputDeviceId: deviceId },
+    });
+    const resumed = c.orchestrator.resumeFromDeviceLoss(deviceId);
+    if (resumed !== sessionId) {
+      c.logger.warn('resumeFromDeviceLoss: sessionId mismatch or no pending session', {
+        requested: sessionId,
+        resumed,
+      });
+    }
+    return {};
+  });
   b.handle(REQUEST.DATA_DELETE_EVERYTHING, async () => {
     c.logger.warn('data.deleteEverything invoked — full nuke');
 
@@ -1078,6 +1095,50 @@ function wireBehaviors(c: ComposedApp): void {
       );
     });
   }
+
+  // ─── Pinned-device-disappeared → push to HUD with device picker ────────
+  // The orchestrator transitions to paused-by-device-loss; we snapshot the
+  // current device list (with the now-missing pinned entry filtered out)
+  // and broadcast so the HUD can render its inline picker + Resume button.
+  c.orchestrator.onDeviceLost(({ sessionId, mode, reason }) => {
+    let devices: ReadonlyArray<{
+      id: string;
+      name: string;
+      isDefault: boolean;
+      kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
+    }> = [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const native = require('@twinmind/coreaudio-darwin') as {
+        listInputDevices?: () => typeof devices;
+      };
+      devices = typeof native.listInputDevices === 'function' ? native.listInputDevices() : [];
+    } catch {
+      /* native not loaded; HUD still shows the panel with just "Auto-detect" */
+    }
+    if (!bridge) return;
+    const payload = {
+      sessionId,
+      mode,
+      lastDeviceLabel: null, // best-effort; native doesn't surface the gone-device label
+      reason,
+      devices,
+    };
+    if (hud) {
+      try {
+        bridge.broadcast(hud.webContents(), PUSH.MIC_DEVICE_LOST, payload);
+      } catch {
+        /* HUD torn down between emit + broadcast */
+      }
+    }
+    for (const win of BrowserWindow.getAllWindows()) {
+      try {
+        bridge.broadcast(win.webContents, PUSH.MIC_DEVICE_LOST, payload);
+      } catch {
+        /* renderer torn down between emit + broadcast */
+      }
+    }
+  });
 
   // ─── Chunk completion → paste (dictation) + broadcast (all modes) ───────
   c.uploadQueue.on('chunk_completed', (e) => {

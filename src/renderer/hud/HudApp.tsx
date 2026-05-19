@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Mic, RotateCw, History, X, Home } from 'lucide-react';
+import { Mic, MicOff, RotateCw, History, X, Home } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 type RecordingState = 'idle' | 'starting' | 'recording' | 'stopping';
@@ -42,11 +42,26 @@ const DRAG_THRESHOLD_PX = 3;
 const LOADER_BAR_COUNT = 12;
 const LOADER_PERIOD_S = 1.0;
 
+/** State for the device-loss pause/resume affordance. Set when main pushes
+ *  MIC_DEVICE_LOST; cleared on successful Resume or user Stop. */
+interface DeviceLostState {
+  readonly sessionId: string;
+  readonly mode: 'dictation' | 'meeting';
+  readonly lastDeviceLabel: string | null;
+  readonly devices: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly isDefault: boolean;
+    readonly kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
+  }>;
+}
+
 export function HudApp() {
   const [recording, setRecording] = useState<RecordingState>('idle');
   const [txState, setTxState] = useState<TranscriptionUiState>({ kind: 'idle' });
   const [hovered, setHovered] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [deviceLost, setDeviceLost] = useState<DeviceLostState | null>(null);
   // Configured hotkey, shown as a chip inside the hover-idle pill. Globe
   // (Fn) is the always-on default; settings.hotkeys.primary is the optional
   // extra. We display the primary if set, otherwise "Fn".
@@ -119,10 +134,20 @@ export function HudApp() {
       if (e.state === 'starting' || e.state === 'recording' || e.state === 'stopping') {
         setRecording(e.state);
         if (e.sessionId) sessionIdRef.current = e.sessionId;
+        // Reaching 'recording' means we're past device loss — clear the pill.
+        if (e.state === 'recording') setDeviceLost(null);
       } else {
         setRecording('idle');
         sessionIdRef.current = null;
       }
+    });
+    const unsubLost = window.electronAPI.on.micDeviceLost((e) => {
+      setDeviceLost({
+        sessionId: e.sessionId,
+        mode: e.mode,
+        lastDeviceLabel: e.lastDeviceLabel,
+        devices: e.devices,
+      });
     });
     // Initial read of the configured primary hotkey + live updates via the
     // HOTKEY_CHANGED push channel. main.ts broadcasts on every successful
@@ -148,6 +173,7 @@ export function HudApp() {
       unsubRec();
       unsubTx();
       unsubHotkey();
+      unsubLost();
     };
   }, []);
 
@@ -216,18 +242,30 @@ export function HudApp() {
   // ─── Resolve the visual state — recording wins over tx ─────────────────
   const isRecording = recording === 'recording';
   const isBusy = recording === 'starting' || recording === 'stopping';
-  type Visual = 'recording' | 'processing' | 'failed' | 'hoverIdle' | 'busy' | 'idle';
-  const visual: Visual = isRecording
-    ? 'recording'
-    : isBusy
-      ? 'busy'
-      : txState.kind === 'processing'
-        ? 'processing'
-        : txState.kind === 'failed'
-          ? 'failed'
-          : hovered
-            ? 'hoverIdle'
-            : 'idle';
+  type Visual =
+    | 'recording'
+    | 'processing'
+    | 'failed'
+    | 'disconnected'
+    | 'hoverIdle'
+    | 'busy'
+    | 'idle';
+  // disconnected takes priority — it means an active session is sitting
+  // paused with a pinned mic that vanished, waiting for the user to pick a
+  // replacement. Surface it over every other state except an active rebind.
+  const visual: Visual = deviceLost && !isRecording
+    ? 'disconnected'
+    : isRecording
+      ? 'recording'
+      : isBusy
+        ? 'busy'
+        : txState.kind === 'processing'
+          ? 'processing'
+          : txState.kind === 'failed'
+            ? 'failed'
+            : hovered
+              ? 'hoverIdle'
+              : 'idle';
   const expanded = visual !== 'idle';
 
   // When the visual changes, the pill's bounds typically change too — but
@@ -316,7 +354,9 @@ export function HudApp() {
               ? 'Transcription failed; retry or open history'
               : visual === 'processing'
                 ? 'Retrying transcription'
-                : 'Start dictation'
+                : visual === 'disconnected'
+                  ? 'Microphone disconnected; pick a device to resume'
+                  : 'Start dictation'
         }
         className={[
           'flex items-center gap-1.5 rounded-full',
@@ -325,7 +365,11 @@ export function HudApp() {
           // "box" around the buttons on transparent backdrops.
           'transition-[width,height,padding] duration-150 ease-out',
           'overflow-hidden text-white select-none cursor-grab active:cursor-grabbing',
-          visual === 'failed' ? 'px-6 py-4 items-stretch' : expanded ? 'px-3' : 'px-2',
+          visual === 'failed' || visual === 'disconnected'
+            ? 'px-6 py-4 items-stretch'
+            : expanded
+              ? 'px-3'
+              : 'px-2',
         ].join(' ')}
         style={{
           // Hover-idle width grows with the hotkey label so long bindings
@@ -382,6 +426,14 @@ export function HudApp() {
         {visual === 'failed' && (
           <FailedBanner
             sessionId={(txState as { kind: 'failed'; sessionId: string }).sessionId}
+          />
+        )}
+        {visual === 'disconnected' && deviceLost && (
+          <DisconnectedBanner
+            sessionId={deviceLost.sessionId}
+            lastDeviceLabel={deviceLost.lastDeviceLabel}
+            devices={deviceLost.devices}
+            onResolved={() => setDeviceLost(null)}
           />
         )}
       </button>
@@ -441,8 +493,17 @@ function HomeButton({
 
 // ─── Visual sub-components ────────────────────────────────────────────────
 
-/** Pill width per visual state. Idle is tiny; failed banner is the widest. */
-function pillWidth(v: 'recording' | 'processing' | 'failed' | 'hoverIdle' | 'busy' | 'idle'): number {
+type PillVisual =
+  | 'recording'
+  | 'processing'
+  | 'failed'
+  | 'disconnected'
+  | 'hoverIdle'
+  | 'busy'
+  | 'idle';
+
+/** Pill width per visual state. Idle is tiny; failed/disconnected are widest. */
+function pillWidth(v: PillVisual): number {
   switch (v) {
     case 'idle':
       return 44;
@@ -457,6 +518,8 @@ function pillWidth(v: 'recording' | 'processing' | 'failed' | 'hoverIdle' | 'bus
     case 'processing':
       return 56;
     case 'failed':
+      return 400;
+    case 'disconnected':
       return 400;
   }
 }
@@ -474,8 +537,8 @@ function hoverIdleWidth(label: string): number {
   return Math.max(140, Math.round(FIXED + label.length * PER_CHAR));
 }
 
-function pillHeight(v: 'recording' | 'processing' | 'failed' | 'hoverIdle' | 'busy' | 'idle'): number {
-  if (v === 'failed') return PILL_HEIGHT_FAILED;
+function pillHeight(v: PillVisual): number {
+  if (v === 'failed' || v === 'disconnected') return PILL_HEIGHT_FAILED;
   if (v === 'idle') return PILL_HEIGHT_IDLE;
   return PILL_HEIGHT_EXPANDED;
 }
@@ -619,6 +682,133 @@ function FailedBanner({ sessionId }: { sessionId: string }) {
         >
           <RotateCw className={`h-3.5 w-3.5 ${retrying ? 'animate-spin' : ''}`} />
           Retry
+        </button>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Disconnected banner: shown when the user's pinned mic disappeared
+ * mid-recording. Inline dropdown lists the currently available input
+ * devices (Auto-detect + Built-in + Other). Resume picks the selected
+ * device, persists it as the new `recording.inputDeviceId`, and tells
+ * the orchestrator to resume the paused session with a fresh chunk
+ * marked `device_boundary=true`. Stop ends the session like a normal
+ * user-stop.
+ */
+function DisconnectedBanner({
+  sessionId,
+  lastDeviceLabel,
+  devices,
+  onResolved,
+}: {
+  sessionId: string;
+  lastDeviceLabel: string | null;
+  devices: ReadonlyArray<{
+    id: string;
+    name: string;
+    isDefault: boolean;
+    kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
+  }>;
+  onResolved: () => void;
+}) {
+  const [selected, setSelected] = useState<string>(''); // '' = Auto-detect
+  const [busy, setBusy] = useState(false);
+
+  const onResume: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    const deviceId = selected === '' ? null : selected;
+    void window.electronAPI.recording_devices
+      .resumeFromDeviceLoss({ sessionId, deviceId })
+      .catch(() => {})
+      .finally(() => {
+        setBusy(false);
+        // Clear locally — main will also push recording_state to 'recording'
+        // which clears it again, but doing it here avoids a one-frame stale
+        // banner if the IPC reply is slow.
+        onResolved();
+      });
+  };
+
+  const onStop: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    // Use the existing stopMeeting channel — it stops whichever session is
+    // active under the given id. The orchestrator marks ended; our local
+    // state clears when 'recording_state' fires with state='idle'.
+    void window.electronAPI.recording
+      .stopMeeting({ sessionId })
+      .catch(() => {})
+      .finally(() => {
+        setBusy(false);
+        onResolved();
+      });
+  };
+
+  const builtIn = devices.filter((d) => d.kind === 'built_in');
+  const other = devices.filter((d) => d.kind !== 'built_in');
+
+  return (
+    <span className="flex h-full w-full items-center justify-center gap-2">
+      <span className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+        <span className="flex items-center gap-2">
+          <MicOff className="h-4 w-4 shrink-0 text-amber-400" strokeWidth={2.5} />
+          <span className="font-serif text-[16px] font-semibold leading-tight text-white">
+            Mic disconnected
+          </span>
+        </span>
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          className="ml-6 max-w-[200px] rounded-md border border-white/15 bg-white/5 px-1.5 py-0.5 text-[12px] text-white/85"
+        >
+          <option value="">Auto-detect (system default)</option>
+          {builtIn.length > 0 && (
+            <optgroup label="Built-in">
+              {builtIn.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {other.length > 0 && (
+            <optgroup label="Other devices">
+              {other.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+        {lastDeviceLabel && (
+          <span className="ml-6 text-[11px] text-white/55">
+            Was: {lastDeviceLabel}
+          </span>
+        )}
+      </span>
+      <span className="flex shrink-0 flex-col justify-center gap-1.5">
+        <button
+          type="button"
+          onClick={onStop}
+          disabled={busy}
+          className="flex w-20 items-center justify-center gap-1 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[12px] font-medium text-white/85 hover:bg-white/10 disabled:opacity-60"
+        >
+          Stop
+        </button>
+        <button
+          type="button"
+          onClick={onResume}
+          disabled={busy}
+          className="flex w-20 items-center justify-center gap-1 rounded-md border border-emerald-700/70 bg-emerald-900/40 px-2 py-1 text-[12px] font-medium text-emerald-100 hover:bg-emerald-900/60 disabled:opacity-60"
+        >
+          Resume
         </button>
       </span>
     </span>

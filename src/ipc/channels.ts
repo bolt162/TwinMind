@@ -26,6 +26,7 @@ export const PUSH = {
   NAVIGATE_TAB: 'navigate_tab',
   HOTKEY_CHANGED: 'hotkey_changed',
   HOTKEY_CAPTURE_KEY: 'hotkey_capture_key',
+  MIC_DEVICE_LOST: 'mic_device_lost',
 } as const;
 export type PushChannel = (typeof PUSH)[keyof typeof PUSH];
 
@@ -62,6 +63,7 @@ export const REQUEST = {
   HOTKEY_CAPTURE_END: 'hotkey.captureEnd',
   RECORDING_LIST_INPUT_DEVICES: 'recording.listInputDevices',
   HUD_SET_MOUSE_IGNORE: 'hud.setMouseIgnore',
+  REC_RESUME_FROM_DEVICE_LOSS: 'recording.resumeFromDeviceLoss',
 } as const;
 export type RequestChannel = (typeof REQUEST)[keyof typeof REQUEST];
 
@@ -177,6 +179,25 @@ export interface HotkeyCaptureKey {
   readonly kind: 'down' | 'up';
   /** KeyboardEvent.code-style identifier. Always 'Fn' today. */
   readonly code: string;
+}
+
+/**
+ * Fired when the user's pinned input device disappears mid-recording. The
+ * orchestrator transitions to a paused state, audio-process tears down its
+ * AudioUnit, and main pushes this event to the HUD so the floating button
+ * can render its "Mic disconnected" affordance — an inline device picker
+ * plus a Resume button.
+ *
+ * `devices` is the snapshot the picker should render. `lastDeviceLabel` is
+ * the human-readable name of the device that just went away (best effort —
+ * native may not have one if the device disappeared too quickly to read).
+ */
+export interface MicDeviceLost {
+  readonly sessionId: string;
+  readonly mode: 'dictation' | 'meeting';
+  readonly lastDeviceLabel: string | null;
+  readonly reason: string;
+  readonly devices: ReadonlyArray<InputDeviceInfo>;
 }
 
 // ─── REQUEST input/output types ─────────────────────────────────────────────
@@ -363,6 +384,7 @@ export interface PushPayloads {
   [PUSH.NAVIGATE_TAB]: NavigateTab;
   [PUSH.HOTKEY_CHANGED]: HotkeyChanged;
   [PUSH.HOTKEY_CAPTURE_KEY]: HotkeyCaptureKey;
+  [PUSH.MIC_DEVICE_LOST]: MicDeviceLost;
 }
 
 /** Request channels: channel name → { input, output } pair. */
@@ -432,4 +454,8 @@ export interface RequestPayloads {
     output: RecordingListInputDevicesOutput;
   };
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: HudSetMouseIgnoreInput; output: Empty };
+  [REQUEST.REC_RESUME_FROM_DEVICE_LOSS]: {
+    input: { readonly sessionId: string; readonly deviceId: string | null };
+    output: Empty;
+  };
 }

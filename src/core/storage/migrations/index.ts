@@ -11,7 +11,9 @@
 
 import type { Migration } from '../Migrator';
 import { SQL_V1_INITIAL } from './0001_initial';
+import { SQL_V2_PAUSED_BY_DEVICE_LOSS } from './0002_paused_by_device_loss';
 
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: SQL_V1_INITIAL },
+  { version: 2, name: 'paused_by_device_loss', sql: SQL_V2_PAUSED_BY_DEVICE_LOSS },
 ];
