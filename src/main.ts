@@ -432,19 +432,28 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
 
   // Sessions.
   b.handle(REQUEST.SESSION_LIST, ({ limit }) => ({
-    sessions: c.jobStore.listSessionsWithFailureCounts(limit ?? 50).map((s) => ({
-      id: s.id,
-      mode: s.mode,
-      status: s.status,
-      startedAt: s.started_at,
-      endedAt: s.ended_at,
-      title: s.title,
-      failedCount: s.failed_count,
-    })),
+    sessions: c.jobStore.listSessionsWithFailureCounts(limit ?? 50).map((s) => {
+      // Use captured-audio duration (max chunk.end_ms) instead of wall-clock
+      // (endedAt − startedAt) so pause-gap time doesn't inflate the display.
+      // Returns 0 when no chunks exist (broken-period sessions); the UI
+      // treats 0 as "nothing recorded yet" by passing null.
+      const audioMs = c.jobStore.getMaxChunkEndMsForSession(s.id);
+      return {
+        id: s.id,
+        mode: s.mode,
+        status: s.status,
+        startedAt: s.started_at,
+        endedAt: s.ended_at,
+        title: s.title,
+        failedCount: s.failed_count,
+        audioDurationMs: audioMs > 0 ? audioMs : null,
+      };
+    }),
   }));
   b.handle(REQUEST.SESSION_GET, ({ sessionId }) => {
     const r = c.jobStore.getSessionWithTranscripts(sessionId);
     if (!r) throw new Error(`session ${sessionId} not found`);
+    const audioMs = c.jobStore.getMaxChunkEndMsForSession(sessionId);
     return {
       id: r.session.id,
       mode: r.session.mode,
@@ -455,6 +464,7 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
       // SessionGetOutput extends SessionListItem which now carries failedCount.
       // For the detail view we surface the per-session count too.
       failedCount: c.jobStore.countFailedChunks(sessionId),
+      audioDurationMs: audioMs > 0 ? audioMs : null,
       transcripts: r.transcripts,
     };
   });
@@ -471,7 +481,10 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     return {};
   });
   b.handle(REQUEST.DICTATION_LIST, ({ limit }) => ({
-    dictations: c.jobStore.listDictationsWithTranscripts(limit ?? 50),
+    dictations: c.jobStore.listDictationsWithTranscripts(limit ?? 50).map((d) => {
+      const audioMs = c.jobStore.getMaxChunkEndMsForSession(d.id);
+      return { ...d, audioDurationMs: audioMs > 0 ? audioMs : null };
+    }),
   }));
   b.handle(REQUEST.SESSION_RETRY_FAILED, ({ sessionId }) => {
     const retriedIds = c.jobStore.resetFailedToCaptured(sessionId);

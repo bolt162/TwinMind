@@ -255,12 +255,19 @@ export interface SettingsHasSecretOutput {
 export interface SessionListItem {
   readonly id: string;
   readonly mode: 'dictation' | 'meeting';
-  readonly status: 'active' | 'ended' | 'paused_by_sleep';
+  readonly status: 'active' | 'ended' | 'paused_by_sleep' | 'paused_by_device_loss';
   readonly startedAt: number;
   readonly endedAt: number | null;
   readonly title: string | null;
   /** Number of retryable `failed_permanent` chunks; drives the row's Retry button. */
   readonly failedCount: number;
+  /**
+   * Captured-audio duration in ms (max(chunks.end_ms) for the session). The UI
+   * shows this as "recording duration" instead of (endedAt − startedAt), so a
+   * device-loss pause gap doesn't inflate the displayed duration past the
+   * actually-recorded audio. Null if the session has no chunks yet.
+   */
+  readonly audioDurationMs: number | null;
 }
 
 export interface SessionListInput {
@@ -418,10 +425,11 @@ export interface RequestPayloads {
     output: {
       dictations: ReadonlyArray<{
         readonly id: string;
-        readonly status: 'active' | 'ended' | 'paused_by_sleep';
+        readonly status: 'active' | 'ended' | 'paused_by_sleep' | 'paused_by_device_loss';
         readonly startedAt: number;
         readonly endedAt: number | null;
         readonly failedCount: number;
+        readonly audioDurationMs: number | null;
         readonly transcripts: ReadonlyArray<{
           readonly chunkId: string;
           readonly startMs: number;

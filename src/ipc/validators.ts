@@ -170,11 +170,15 @@ const settingsHasSecretOutput = z.object({ present: z.boolean() });
 const sessionListItem = z.object({
   id: z.string().min(1).max(64),
   mode: z.enum(['dictation', 'meeting']),
-  status: z.enum(['active', 'ended', 'paused_by_sleep']),
+  status: z.enum(['active', 'ended', 'paused_by_sleep', 'paused_by_device_loss']),
   startedAt: z.number().int().nonnegative(),
   endedAt: z.number().int().nonnegative().nullable(),
   title: z.string().max(256).nullable(),
   failedCount: z.number().int().nonnegative(),
+  /** Captured-audio duration in ms (max(chunks.end_ms) for this session). Null
+   *  if the session has no chunks yet. Used by the UI as the displayed
+   *  recording duration so device-loss pause gaps don't inflate it. */
+  audioDurationMs: z.number().int().nonnegative().nullable(),
 });
 
 const sessionListInput = z.object({
@@ -214,10 +218,11 @@ const dictationListOutput = z.object({
     .array(
       z.object({
         id: z.string().min(1).max(64),
-        status: z.enum(['active', 'ended', 'paused_by_sleep']),
+        status: z.enum(['active', 'ended', 'paused_by_sleep', 'paused_by_device_loss']),
         startedAt: z.number().int().nonnegative(),
         endedAt: z.number().int().nonnegative().nullable(),
         failedCount: z.number().int().nonnegative(),
+        audioDurationMs: z.number().int().nonnegative().nullable(),
         transcripts: z.array(
           z.object({
             chunkId: z.string().min(1).max(64),

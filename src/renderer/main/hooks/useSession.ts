@@ -12,16 +12,18 @@ export interface SessionTranscriptItem {
   chunkId: string;
   startMs: number;
   endMs: number;
+  overlapPrefixMs: number;
   text: string;
 }
 
 export interface SessionDetailData {
   id: string;
   mode: 'dictation' | 'meeting';
-  status: 'active' | 'ended' | 'paused_by_sleep';
+  status: 'active' | 'ended' | 'paused_by_sleep' | 'paused_by_device_loss';
   startedAt: number;
   endedAt: number | null;
   title: string | null;
+  audioDurationMs: number | null;
   transcripts: SessionTranscriptItem[];
 }
 

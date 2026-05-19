@@ -8,12 +8,14 @@ import { useCallback, useEffect, useState } from 'react';
 export interface SessionListItem {
   id: string;
   mode: 'dictation' | 'meeting';
-  status: 'active' | 'ended' | 'paused_by_sleep';
+  status: 'active' | 'ended' | 'paused_by_sleep' | 'paused_by_device_loss';
   startedAt: number;
   endedAt: number | null;
   title: string | null;
   /** Retryable failed_permanent chunk count; drives the row's Retry button. */
   failedCount: number;
+  /** Captured audio total in ms (max chunk.end_ms); null when no chunks. */
+  audioDurationMs: number | null;
 }
 
 export function useSessions(limit = 50) {

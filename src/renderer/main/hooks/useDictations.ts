@@ -8,10 +8,12 @@ import { useCallback, useEffect, useState } from 'react';
 
 export interface DictationTile {
   id: string;
-  status: 'active' | 'ended' | 'paused_by_sleep';
+  status: 'active' | 'ended' | 'paused_by_sleep' | 'paused_by_device_loss';
   startedAt: number;
   endedAt: number | null;
   failedCount: number;
+  /** Captured audio total in ms (max chunk.end_ms); null when no chunks. */
+  audioDurationMs: number | null;
   transcripts: ReadonlyArray<{
     chunkId: string;
     startMs: number;

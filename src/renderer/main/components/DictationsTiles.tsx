@@ -57,9 +57,12 @@ function DictationCard({
   const [retrying, setRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
   const started = new Date(dictation.startedAt);
-  const durationSec = dictation.endedAt
-    ? Math.max(0, Math.round((dictation.endedAt - dictation.startedAt) / 1000))
-    : null;
+  // Captured-audio duration (max chunk.end_ms), not wall-clock — see
+  // session.get IPC handler for the rationale.
+  const durationSec =
+    dictation.audioDurationMs !== null && dictation.audioDurationMs > 0
+      ? Math.round(dictation.audioDurationMs / 1000)
+      : null;
   const isLive = dictation.status === 'active';
   const hasFailures = dictation.failedCount > 0;
   const fullText = dictation.transcripts.map((t) => t.text).join(' ').trim();

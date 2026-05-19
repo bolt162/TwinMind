@@ -49,9 +49,13 @@ export function SessionDetail({ sessionId, onClose }: Props) {
 function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSession>['data']> }) {
   const Icon = data.mode === 'meeting' ? Radio : Mic;
   const started = new Date(data.startedAt);
-  const durationSec = data.endedAt
-    ? Math.max(0, Math.round((data.endedAt - data.startedAt) / 1000))
-    : null;
+  // Duration = captured audio time, not wall-clock-since-start. Device-loss
+  // pauses and similar gaps don't get counted in the displayed total — the
+  // chunk-table is the authoritative timeline.
+  const durationSec =
+    data.audioDurationMs !== null && data.audioDurationMs > 0
+      ? Math.round(data.audioDurationMs / 1000)
+      : null;
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
       <div className="flex items-center gap-3">
@@ -69,6 +73,7 @@ function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSessio
               </span>
             )}
             {data.status === 'paused_by_sleep' && ' · paused by sleep'}
+            {data.status === 'paused_by_device_loss' && ' · paused (mic disconnected)'}
           </div>
         </div>
       </div>
