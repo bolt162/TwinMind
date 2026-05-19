@@ -49,6 +49,7 @@ export class MockMicCapture implements ICapture {
   private readonly listeners: { [E in keyof CaptureEvents]: Set<CaptureEvents[E]> } = {
     pcm: new Set(),
     deviceChange: new Set(),
+    rebound: new Set(),
     error: new Set(),
   };
   private timer: NodeJS.Timeout | null = null;

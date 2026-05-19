@@ -80,9 +80,15 @@ function selectSystemAudioCapture(): ISystemAudioCapture | undefined {
  */
 class AudioTeeAdapter implements ICapture {
   private tee: { start(): Promise<void>; stop(): Promise<void>; on: (e: string, cb: (...args: any[]) => void) => void } | null = null;
-  private readonly listeners: { pcm: Set<any>; deviceChange: Set<any>; error: Set<any> } = {
+  private readonly listeners: {
+    pcm: Set<any>;
+    deviceChange: Set<any>;
+    rebound: Set<any>;
+    error: Set<any>;
+  } = {
     pcm: new Set(),
     deviceChange: new Set(),
+    rebound: new Set(),
     error: new Set(),
   };
 
@@ -115,7 +121,7 @@ class AudioTeeAdapter implements ICapture {
   }
 
   /** Standard type-safe subscribe; returns an unsubscribe. */
-  on(event: 'pcm' | 'deviceChange' | 'error', listener: any): () => void {
+  on(event: 'pcm' | 'deviceChange' | 'rebound' | 'error', listener: any): () => void {
     this.listeners[event].add(listener);
     return () => this.listeners[event].delete(listener);
   }

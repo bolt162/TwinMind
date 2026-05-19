@@ -32,10 +32,18 @@ export interface DeviceChangeInfo {
 /**
  * Listener registry. We hand-roll a tiny one rather than depending on
  * Node's `EventEmitter`, which gives us typed events without an `any` shim.
+ *
+ *   - `deviceChange` — informational notification (label hint, no rebind
+ *     commitment). For telemetry / UI hints.
+ *   - `rebound` — emitted by the impl after it successfully re-binds to a
+ *     new device on its own (e.g., the AUHAL impl detecting a system-default
+ *     change in auto-detect mode). AudioGraph forwards as `mic_rebound`
+ *     so the orchestrator marks `device_boundary=true` on the next chunk.
  */
 export interface CaptureEvents {
   pcm: (buf: Buffer, capturedAtMonoNs: bigint) => void;
   deviceChange: (info: DeviceChangeInfo) => void;
+  rebound: () => void;
   error: (err: Error) => void;
 }
 

@@ -66,13 +66,6 @@ export class AudioGraph {
    */
   private micUnsubs: Array<() => void> = [];
   /**
-   * Start options used for the current mic — replayed on rebind so the new
-   * engine instance picks up the same sample rate / channels.
-   */
-  private micStartOpts: { sampleRate: number; channels: 1 } | null = null;
-  /** Coalesces back-to-back device_change events; only the last wins. */
-  private rebindDebounceTimer: NodeJS.Timeout | null = null;
-  /**
    * Cumulative count of mixed mono int16 samples emitted since session
    * start. Used to compute the `audioClockMs` field on amplitude_sample —
    * the HUD takes that as the authoritative recording-elapsed timer
@@ -99,14 +92,6 @@ export class AudioGraph {
    * to send `close_chunk` back.
    */
   private rotationDueSent = false;
-  /** Re-entry guard for rebindMic; also blocks self-triggered loops. */
-  private rebindInFlight = false;
-  /**
-   * After a rebind, the new engine often fires its own configuration-change
-   * notification almost immediately. Ignoring device_change for a short
-   * cooldown prevents a tight rebind→change→rebind loop.
-   */
-  private rebindCooldownUntil = 0;
 
   /** Flipped to true on the first mic frame of the current chunk; read by the
    *  audio-process watchdog to detect "engine claims started but no audio". */
@@ -158,12 +143,8 @@ export class AudioGraph {
     this.samplesEmitted = 0;
     this.sessionSampleRate = msg.sampleRate;
 
-    this.micStartOpts = {
-      sampleRate: msg.sampleRate,
-      channels: 1,
-    };
     this.attachMicListeners();
-    await this.mic.start(this.micStartOpts);
+    await this.mic.start({ sampleRate: msg.sampleRate, channels: 1 });
 
     if (msg.mode === 'meeting' && msg.enableSystemAudio && this.system) {
       this.unsubs.push(
@@ -189,15 +170,10 @@ export class AudioGraph {
 
   /** Detach listeners, stop sources, drop any queued data. */
   async stopSession(): Promise<void> {
-    if (this.rebindDebounceTimer) {
-      clearTimeout(this.rebindDebounceTimer);
-      this.rebindDebounceTimer = null;
-    }
     for (const u of this.micUnsubs) u();
     this.micUnsubs = [];
     for (const u of this.unsubs) u();
     this.unsubs = [];
-    this.micStartOpts = null;
     await this.mic.stop().catch(() => {});
     if (this.system) await this.system.stop().catch(() => {});
     this.mixer?.drop();
@@ -206,68 +182,24 @@ export class AudioGraph {
   }
 
   /**
-   * Attach the mic-side listeners and stash their unsubs in `micUnsubs` so
-   * a later rebind can tear down only the mic without disturbing system
-   * audio. Idempotent only via the empty-array precondition — callers
-   * (startSession, rebindMic) clear `micUnsubs` first.
+   * Attach the mic-side listeners. The native (AUHAL) impl owns its own
+   * rebind lifecycle for the auto-detect case — when the system default
+   * input changes, it stops + starts the AudioUnit internally and emits
+   * a `rebound` event. We just forward `deviceChange` for telemetry and
+   * `rebound` so the orchestrator can mark the next chunk with
+   * `device_boundary=true`. No debounce, no cooldown, no host-side rebind.
    */
   private attachMicListeners(): void {
     this.micUnsubs.push(
       this.mic.on('pcm', (buf) => this.onMicFrame(buf)),
-      this.mic.on('deviceChange', (info) => this.handleMicDeviceChange(info)),
+      this.mic.on('deviceChange', (info) =>
+        this.send({ type: 'device_change', kind: 'mic', label: info.label }),
+      ),
+      this.mic.on('rebound', () => this.send({ type: 'mic_rebound' })),
       this.mic.on('error', (err) =>
         this.send({ type: 'capture_error', source: 'mic', message: err.message }),
       ),
     );
-  }
-
-  /**
-   * Forward the device-change event to main (for UX), then schedule a
-   * rebind. Debounced so a noisy disconnect→reconnect storm coalesces
-   * into a single rebind. Cooldown after rebind suppresses the
-   * configuration-change notification AVAudioEngine fires when WE
-   * just restarted it, breaking what would otherwise be a tight loop.
-   */
-  private handleMicDeviceChange(info: { label: string | null }): void {
-    this.send({ type: 'device_change', kind: 'mic', label: info.label });
-    if (Date.now() < this.rebindCooldownUntil) return;
-    if (this.rebindDebounceTimer) clearTimeout(this.rebindDebounceTimer);
-    this.rebindDebounceTimer = setTimeout(() => {
-      this.rebindDebounceTimer = null;
-      void this.rebindMic().catch((err) => {
-        this.send({
-          type: 'capture_error',
-          source: 'mic',
-          message: `rebindMic failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      });
-    }, 400);
-  }
-
-  /**
-   * Restart the mic capture against whatever the system default is right
-   * now. Used when the previously-bound device disappears (Bluetooth out
-   * of range, USB unplugged) or when the user changes default. System
-   * audio capture is untouched — it taps the meeting app's output, not
-   * the input device, so it's immune to mic switches.
-   */
-  private async rebindMic(): Promise<void> {
-    if (!this.mixer || !this.micStartOpts) return; // no active session
-    if (this.rebindInFlight) return;
-    this.rebindInFlight = true;
-    try {
-      for (const u of this.micUnsubs) u();
-      this.micUnsubs = [];
-      await this.mic.stop().catch(() => {});
-      await this.mic.start(this.micStartOpts);
-      this.attachMicListeners();
-      // The new engine may emit one or more configuration-change events
-      // shortly after start. Window it out so we don't ping-pong.
-      this.rebindCooldownUntil = Date.now() + 1500;
-      this.send({ type: 'mic_rebound' });
-    } finally {
-      this.rebindInFlight = false;
-    }
   }
 
   /**
