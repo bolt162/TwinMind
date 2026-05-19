@@ -33,7 +33,12 @@ try {
 /** Build an ICapture-shaped mic capture object. */
 function micCapture() {
   const inner = new native.MicCapture();
-  const listeners = { pcm: new Set(), deviceChange: new Set(), error: new Set() };
+  const listeners = {
+    pcm: new Set(),
+    deviceChange: new Set(),
+    rebound: new Set(),
+    error: new Set(),
+  };
   let pcmErrLogged = false;
 
   // Wire each native callback into our listener fan-out. Listeners can attach
@@ -61,18 +66,27 @@ function micCapture() {
   inner.setOnDeviceChange((info) => {
     for (const cb of listeners.deviceChange) cb({ label: (info && info.label) || null });
   });
+  inner.setOnRebound(() => {
+    for (const cb of listeners.rebound) cb();
+  });
 
   return {
-    /** Begin capture. AVAudioEngine starts synchronously; rejects on error.
-     *  Honors `opts.deviceId` (CoreAudio device UID); falls back to system
-     *  default when omitted or when the device can't be resolved. */
+    /** Begin capture. AUHAL starts synchronously; throws on error.
+     *  `opts.deviceId` empty string / undefined = auto-detect (system
+     *  default with live re-bind on system-default change). Any UID = pinned
+     *  (no auto-switch; emits 'error' with message='device_disappeared' if
+     *  the pinned device goes away). */
     async start(opts) {
       const deviceId = opts && typeof opts.deviceId === 'string' ? opts.deviceId : '';
       inner.start(deviceId);
     },
-    /** Stop capture and remove the engine tap. */
+    /** Stop capture + dispose the audio unit. */
     async stop() {
       inner.stop();
+    },
+    /** Mid-session device switch. Empty string = back to auto-detect. */
+    setDevice(deviceId) {
+      inner.setDevice(typeof deviceId === 'string' ? deviceId : '');
     },
     /** Typed subscribe; returns unsubscribe. */
     on(event, listener) {

@@ -406,6 +406,10 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
       // Push to all renderers so the HUD chip + future hints refresh live.
       broadcastHotkeyChanged(nextHotkey);
     }
+    // Surface every settings save to composition so it can live-react —
+    // currently used to push `recording.inputDeviceId` changes to native
+    // mid-session without waiting for the next start.
+    c.notifySettingsChanged();
     return {};
   });
   b.handle(REQUEST.SETTINGS_SET_SECRET, ({ name, value }) => {
@@ -510,7 +514,12 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const native = require('@twinmind/coreaudio-darwin') as {
-        listInputDevices?: () => Array<{ id: string; name: string; isDefault: boolean }>;
+        listInputDevices?: () => Array<{
+          id: string;
+          name: string;
+          isDefault: boolean;
+          kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
+        }>;
       };
       const devices = typeof native.listInputDevices === 'function' ? native.listInputDevices() : [];
       return { devices };

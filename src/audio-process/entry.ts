@@ -219,6 +219,9 @@ function bootstrap(): void {
         case 'close_chunk':
           graph.closeChunk(msg);
           return;
+        case 'set_mic_device':
+          graph.setMicDevice(msg.micDeviceId ?? null);
+          return;
         case 'shutdown':
           await graph.stopSession();
           return;

@@ -80,6 +80,13 @@ export interface ComposedApp {
   readonly logger: Logger;
   readonly crash: ICrashReporter;
   readonly analytics: IAnalyticsClient;
+  /**
+   * Hook called by main.ts after a successful SETTINGS_SET. Lets composition
+   * react to mutable settings while a session is live — currently used to
+   * push `recording.inputDeviceId` changes to the native mic without waiting
+   * for the next session. No-op when not recording.
+   */
+  notifySettingsChanged(): void;
   /** Tear everything down in reverse order (used at app quit). */
   shutdown(): Promise<void>;
 }
@@ -194,6 +201,11 @@ export function compose({ audioLink, platform, appVersion }: ComposeInput): Comp
     link: audioLink,
     clock: SystemClock,
     logger,
+    // Re-read settings on every session start so the picker change takes
+    // effect on the *next* recording without a restart. For mid-session
+    // changes, main.ts calls `notifySettingsChanged()` below which routes
+    // through `orchestrator.setMicDevice`.
+    getMicDeviceId: () => settings.load().settings.recording.inputDeviceId,
   });
   orchestrator.on('state_changed', (s) => {
     if (s.state === 'recording') {
@@ -244,6 +256,12 @@ export function compose({ audioLink, platform, appVersion }: ComposeInput): Comp
     logger,
     crash,
     analytics,
+    notifySettingsChanged() {
+      // Currently only the input device picker can change mid-session
+      // meaningfully. Re-read and signal native if a session is in flight.
+      const nextId = settings.load().settings.recording.inputDeviceId;
+      orchestrator.setMicDevice(nextId);
+    },
     async shutdown() {
       if (orchestrator.state === 'recording') orchestrator.stop('shutdown');
       meetingDetection?.stop();

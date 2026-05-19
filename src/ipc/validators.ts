@@ -104,6 +104,7 @@ const recordingListInputDevicesOutput = z.object({
       id: z.string().min(1).max(256),
       name: z.string().max(256),
       isDefault: z.boolean(),
+      kind: z.enum(['built_in', 'bluetooth', 'usb', 'other']),
     }),
   ).max(64),
 });

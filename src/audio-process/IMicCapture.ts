@@ -54,6 +54,13 @@ export interface ICapture {
   /** Stop capture. Resolves once no more 'pcm' events will fire. */
   stop(): Promise<void>;
 
+  /**
+   * Mid-session device hot-swap. Empty string / null = follow system
+   * default. Optional on the interface so mock impls can omit it; real
+   * impls (native AUHAL) implement it. Emits 'rebound' on success.
+   */
+  setDevice?(deviceId: string | null): void;
+
   /** Type-safe `on`; returns an unsubscribe fn. */
   on<E extends keyof CaptureEvents>(event: E, listener: CaptureEvents[E]): () => void;
 }

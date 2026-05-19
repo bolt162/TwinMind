@@ -8,8 +8,11 @@
 export interface ICaptureLike {
   start(opts?: unknown): Promise<void>;
   stop(): Promise<void>;
+  /** Mid-session device hot-swap; empty string = follow system default. */
+  setDevice(deviceId: string): void;
   on(event: 'pcm', cb: (buf: Buffer, capturedAtMonoNs: bigint) => void): () => void;
   on(event: 'deviceChange', cb: (info: { label: string | null }) => void): () => void;
+  on(event: 'rebound', cb: () => void): () => void;
   on(event: 'error', cb: (err: Error) => void): () => void;
 }
 
@@ -40,6 +43,10 @@ export interface InputDeviceInfo {
   readonly name: string;
   /** True iff this device is currently the system default input. */
   readonly isDefault: boolean;
+  /** Transport class read from kAudioDevicePropertyTransportType — used by
+   *  the Settings picker to group entries. "other" covers aggregate, virtual,
+   *  HDMI, and unknown transports. */
+  readonly kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
 }
 
 export interface IGlobeKeyLike {

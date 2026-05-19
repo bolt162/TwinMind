@@ -312,6 +312,9 @@ export interface InputDeviceInfo {
   readonly id: string;
   readonly name: string;
   readonly isDefault: boolean;
+  /** Transport class from kAudioDevicePropertyTransportType. UI groups the
+   *  picker into "Built-in" (kind=built_in) and "Other devices" (rest). */
+  readonly kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
 }
 
 export interface RecordingListInputDevicesOutput {

@@ -22,6 +22,7 @@ export type MainToAudio =
   | StopSessionMsg
   | OpenChunkMsg
   | CloseChunkMsg
+  | SetMicDeviceMsg
   | ShutdownMsg;
 
 /** Begin capturing for a fresh session. */
@@ -33,6 +34,25 @@ export interface StartSessionMsg {
   readonly enableSystemAudio: boolean;
   /** 16 000 for V2; configurable for future. */
   readonly sampleRate: number;
+  /**
+   * Optional CoreAudio device UID. When set, the native AUHAL mic capture
+   * pins to this device; when null/undefined, it follows the system default
+   * input (and live-rebinds on `kAudioHardwarePropertyDefaultInputDevice`
+   * changes). Used by the Settings "Input device" picker.
+   */
+  readonly micDeviceId?: string;
+}
+
+/**
+ * Mid-session mic device switch. Audio-process forwards to native's
+ * `setDevice`; emits a `mic_rebound` on success. Triggered by main when the
+ * user changes their device pick in Settings while a recording is in
+ * flight (without this, the change would only take effect on next session).
+ */
+export interface SetMicDeviceMsg {
+  readonly type: 'set_mic_device';
+  /** UID to pin, or null/undefined to switch back to auto-detect. */
+  readonly micDeviceId?: string;
 }
 
 /** Stop capture; finalize anything pending; do not emit further pcm_frames. */

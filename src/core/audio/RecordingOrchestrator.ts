@@ -54,6 +54,14 @@ export interface RecordingOrchestratorDeps {
   readonly link: AudioProcessLink;
   readonly clock: Clock;
   readonly logger?: Logger;
+  /**
+   * Returns the user-configured input device UID (from settings), or null to
+   * follow the system default. Called fresh at every session start so a
+   * picker change takes effect on the next recording without an app restart.
+   * For mid-session hot-swap use `setMicDevice` (called by main on
+   * SETTINGS_SET while recording).
+   */
+  readonly getMicDeviceId?: () => string | null;
 }
 
 interface ActiveSession {
@@ -93,6 +101,8 @@ export class RecordingOrchestrator {
    */
   private pendingDeviceBoundary = false;
 
+  private readonly getMicDeviceId: (() => string | null) | undefined;
+
   /** Construct with deps; subscribes to AudioProcessLink for audio events. */
   constructor(deps: RecordingOrchestratorDeps) {
     this.store = deps.store;
@@ -100,7 +110,23 @@ export class RecordingOrchestrator {
     this.link = deps.link;
     this.clock = deps.clock;
     this.logger = deps.logger ?? noopLogger;
+    this.getMicDeviceId = deps.getMicDeviceId;
     this.link.on((msg) => this.handleAudioMessage(msg));
+  }
+
+  /**
+   * Mid-session device hot-swap. main calls this from SETTINGS_SET when the
+   * user picks a different input device while a recording is in flight.
+   * The audio-process forwards to native, which emits `mic_rebound` after
+   * the swap; the next chunk after that boundary is marked
+   * `device_boundary=true`.
+   */
+  setMicDevice(deviceId: string | null): void {
+    if (this.stateInternal !== 'recording') return;
+    this.link.send({
+      type: 'set_mic_device',
+      ...(deviceId ? { micDeviceId: deviceId } : {}),
+    });
   }
 
   /**
@@ -319,12 +345,14 @@ export class RecordingOrchestrator {
       title,
     });
 
+    const micDeviceId = this.getMicDeviceId?.() ?? null;
     this.link.send({
       type: 'start_session',
       sessionId,
       mode,
       enableSystemAudio: behavior.enableSystemAudio,
       sampleRate: 16_000,
+      ...(micDeviceId ? { micDeviceId } : {}),
     });
 
     const chunkId = randomUUID();

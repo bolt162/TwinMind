@@ -285,7 +285,13 @@ function InputDeviceField({
   value: string | null;
   onChange: (next: string | null) => void;
 }) {
-  type DeviceInfo = { id: string; name: string; isDefault: boolean };
+  type DeviceKind = 'built_in' | 'bluetooth' | 'usb' | 'other';
+  type DeviceInfo = {
+    id: string;
+    name: string;
+    isDefault: boolean;
+    kind: DeviceKind;
+  };
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -302,6 +308,13 @@ function InputDeviceField({
     void refresh();
   }, []);
 
+  // Bucket the devices for the optgroup layout. Built-in stays its own
+  // group (usually one entry — the Mac's mic); everything else goes under
+  // "Other devices" since the user mostly cares about "built-in vs not"
+  // when picking.
+  const builtIn = devices.filter((d) => d.kind === 'built_in');
+  const other = devices.filter((d) => d.kind !== 'built_in');
+
   // If the saved deviceId is no longer in the device list (unplugged since
   // last session), still show it as "Unavailable — <id>" so the user knows
   // why their input behavior changed.
@@ -317,13 +330,27 @@ function InputDeviceField({
           onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
           className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-sm"
         >
-          <option value="">System default</option>
-          {devices.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-              {d.isDefault ? ' (current default)' : ''}
-            </option>
-          ))}
+          <option value="">Auto-detect (system default)</option>
+          {builtIn.length > 0 && (
+            <optgroup label="Built-in">
+              {builtIn.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                  {d.isDefault ? ' (current default)' : ''}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {other.length > 0 && (
+            <optgroup label="Other devices">
+              {other.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                  {d.isDefault ? ' (current default)' : ''}
+                </option>
+              ))}
+            </optgroup>
+          )}
           {showOrphan && (
             <option key={value ?? ''} value={value ?? ''}>
               Unavailable — {value}
@@ -340,9 +367,10 @@ function InputDeviceField({
         </button>
       </div>
       <span className="block text-xs text-zinc-500">
-        Pin TwinMind to a specific mic, or let it follow your Mac's default. If your meeting app
-        (Zoom, Meet) is set to a different device, TwinMind won't follow it automatically — set
-        them to the same device for a matching transcript.
+        Auto-detect follows whatever your Mac considers the current default —
+        TwinMind switches with it during a recording (e.g. when you connect
+        AirPods). Pick a specific device to pin it; TwinMind won't switch
+        away even if you change the default mid-recording.
       </span>
     </label>
   );

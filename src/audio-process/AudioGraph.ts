@@ -144,7 +144,11 @@ export class AudioGraph {
     this.sessionSampleRate = msg.sampleRate;
 
     this.attachMicListeners();
-    await this.mic.start({ sampleRate: msg.sampleRate, channels: 1 });
+    await this.mic.start({
+      sampleRate: msg.sampleRate,
+      channels: 1,
+      ...(msg.micDeviceId ? { deviceId: msg.micDeviceId } : {}),
+    });
 
     if (msg.mode === 'meeting' && msg.enableSystemAudio && this.system) {
       this.unsubs.push(
@@ -158,6 +162,19 @@ export class AudioGraph {
       );
       await this.system.start({ sampleRate: msg.sampleRate, channels: 1 });
     }
+  }
+
+  /**
+   * Mid-session device hot-swap. Forwards to the native impl's `setDevice`;
+   * the native side rebinds the AudioUnit and emits `rebound` on success or
+   * `error` if the requested device can't be opened. Idempotent if the
+   * device hasn't changed. No-op if no session is active or the impl doesn't
+   * support hot-swap (mocks).
+   */
+  setMicDevice(deviceId: string | null): void {
+    if (this.micUnsubs.length === 0) return; // no active session
+    const fn = (this.mic as { setDevice?: (id: string | null) => void }).setDevice;
+    if (typeof fn === 'function') fn.call(this.mic, deviceId);
   }
 
   /** Diagnostic snapshot used by the audio-process watchdog. */
