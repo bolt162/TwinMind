@@ -1015,6 +1015,20 @@ static OSStatus PinnedDeviceAliveChanged(AudioObjectID inObjectID,
   if (s != noErr) isAlive = 0;
   if (isAlive != 0) return noErr; // benign property notification
 
+  // Stop the audio unit *immediately*, before the JS-side teardown round-trip.
+  // Without this, the AudioUnit holds an active input session against a
+  // now-gone device for ~10–30 ms while the 'device_disappeared' error travels
+  // through audio-process → main → orchestrator → back to native StopInternal.
+  // During that window macOS's audio router sees "app needs input, device is
+  // dead" and offers a substitute — most visibly the iPhone Continuity
+  // Microphone, which flashes a "Connect microphone to MacBook Pro?" prompt.
+  // AudioOutputUnitStop is documented thread-safe and synchronous; calling it
+  // here tells macOS we're done immediately so the substitute hunt never
+  // starts. Full disposal still happens later via StopInternal.
+  if (ctx->auHal) {
+    AudioOutputUnitStop(ctx->auHal);
+  }
+
   if (ctx->onError) {
     std::string msg = "device_disappeared";
     ctx->onError.BlockingCall([msg](Napi::Env env, Napi::Function jsCallback) {

@@ -335,29 +335,44 @@ export class RecordingOrchestrator {
     } catch (e) {
       this.logger.warn('markSessionActive (resume) failed', { err: String(e) });
     }
+
+    // Anchor resume to where audio actually stopped, NOT wall-clock elapsed.
+    // The user's device-loss UI took some time; nothing was captured during
+    // that interval. Stamping the next chunk at wall-clock-elapsed-since-start
+    // would surface a visible gap on the transcript list (e.g. 0:26 → 0:37)
+    // and the HUD timer would jump backwards to 0:00 since the audio-process
+    // resets its `samplesEmitted` on every start_session.
+    //
+    // Use the previous chunk's end_ms as the audio-clock anchor — it's the
+    // last value the audio-process actually wrote out, so it's continuous
+    // with what the user saw on the timer at pause. Pass it to the audio
+    // process via `audioClockStartMs` so it seeds `samplesEmitted` and the
+    // HUD timer keeps reading the same value across the resume boundary.
+    const resumeAtMs = this.store.getMaxChunkEndMsForSession(p.sessionId);
+
     this.link.send({
       type: 'start_session',
       sessionId: p.sessionId,
       mode: p.mode,
       enableSystemAudio: p.behavior.enableSystemAudio,
       sampleRate: 16_000,
+      audioClockStartMs: resumeAtMs,
       ...(deviceId ? { micDeviceId: deviceId } : {}),
     });
 
     const chunkId = randomUUID();
-    const elapsed = this.clock.now() - p.startedAt;
     const nextIdx = p.chunkIdx + 1;
     this.chunkWriter.beginChunk({
       chunkId,
       sessionId: p.sessionId,
       idx: nextIdx,
       source: p.mode === 'dictation' ? 'mic' : 'mixed',
-      startMs: elapsed,
+      startMs: resumeAtMs,
       overlapPrefixMs: 0,
       deviceBoundary: true,
       sleepBoundary: false,
     });
-    this.link.send({ type: 'open_chunk', chunkId, startMs: elapsed, overlapPrefixMs: 0 });
+    this.link.send({ type: 'open_chunk', chunkId, startMs: resumeAtMs, overlapPrefixMs: 0 });
 
     this.active = {
       sessionId: p.sessionId,
@@ -366,11 +381,14 @@ export class RecordingOrchestrator {
       startedAt: p.startedAt,
       chunkIdx: nextIdx,
       currentChunkId: chunkId,
-      currentChunkStartMs: elapsed,
+      currentChunkStartMs: resumeAtMs,
       currentChunkOverlapMs: 0,
     };
     this.setState('recording');
-    this.logger.info('session resumed after device loss', { sessionId: p.sessionId });
+    this.logger.info('session resumed after device loss', {
+      sessionId: p.sessionId,
+      resumeAtMs,
+    });
     return p.sessionId;
   }
 

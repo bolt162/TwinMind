@@ -158,7 +158,14 @@ export class AudioGraph {
     this.mixer = new Mixer(msg.mode, DEFAULT_MIXER_CONFIG);
     this.micAgc = new SoftwareAgc();
     this.firstMicFrameSeen = false;
-    this.samplesEmitted = 0;
+    // Seed audio-clock. `audioClockStartMs` is non-zero only on resume
+    // (after a paused_by_device_loss or paused_by_sleep flow) — it lets the
+    // resumed session continue counting from the last chunk's end_ms so the
+    // HUD timer doesn't jump back to 0:00 and the new chunks align with the
+    // pre-pause timeline.
+    this.samplesEmitted = msg.audioClockStartMs
+      ? Math.round((msg.audioClockStartMs * msg.sampleRate) / 1000)
+      : 0;
     this.sessionSampleRate = msg.sampleRate;
     this.lastRealPcmAtMs = Date.now();
     this.consecutiveSilenceMs = 0;

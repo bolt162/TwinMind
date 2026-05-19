@@ -41,6 +41,16 @@ export interface StartSessionMsg {
    * changes). Used by the Settings "Input device" picker.
    */
   readonly micDeviceId?: string;
+  /**
+   * Seed value for the audio-process's `samplesEmitted` counter. Used by
+   * `resumeFromDeviceLoss` so the resumed session's audio-clock continues
+   * from where the previous session left off (the last chunk's `end_ms`)
+   * instead of resetting to 0. Without this the HUD timer would jump back
+   * to 0:00 on resume and the new chunks would be stamped from wall-clock
+   * elapsed-since-session-start, producing a confusing visible gap.
+   * Omit/0 for fresh sessions.
+   */
+  readonly audioClockStartMs?: number;
 }
 
 /**

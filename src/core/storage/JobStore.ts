@@ -343,6 +343,23 @@ export class JobStore {
   }
 
   /**
+   * Highest `end_ms` across all chunks of a session. Used by
+   * `resumeFromDeviceLoss` to anchor the next chunk to where audio actually
+   * stopped (the last chunk's stored end_ms = the audio-clock at pause),
+   * not to wall-clock-since-session-start. Without this, the resumed chunk
+   * would surface as a visible gap on the transcript list.
+   *
+   * Returns 0 if the session has no chunks yet (shouldn't happen on resume,
+   * but defensive).
+   */
+  getMaxChunkEndMsForSession(sessionId: string): number {
+    const row = this.stmts.getMaxChunkEndMs.get({ session_id: sessionId }) as
+      | { max_end_ms: number | null }
+      | undefined;
+    return row?.max_end_ms ?? 0;
+  }
+
+  /**
    * Reset transient `failed_permanent` chunks back to `captured` so the
    * UploadQueue picks them up again. Only retryable error classes are reset
    * — permanently dead audio (auth, bad_audio, client_4xx) stays failed so
@@ -841,6 +858,9 @@ export class JobStore {
         JOIN chunks c ON c.id = t.chunk_id
         WHERE c.session_id = @session_id
         ORDER BY c.idx ASC, c.source ASC
+      `),
+      getMaxChunkEndMs: this.db.prepare(`
+        SELECT MAX(end_ms) AS max_end_ms FROM chunks WHERE session_id = @session_id
       `),
 
       // ── mic activity ──
