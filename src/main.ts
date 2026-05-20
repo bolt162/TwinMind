@@ -1260,9 +1260,13 @@ function broadcastSummaryState(
   sessionId: string,
   status: 'pending' | 'completed' | 'failed',
   summaryId?: string,
+  title?: string,
 ): void {
   if (!bridge) return;
-  const payload = summaryId ? { sessionId, status, summaryId } : { sessionId, status };
+  const payload: { sessionId: string; status: typeof status; summaryId?: string; title?: string } =
+    { sessionId, status };
+  if (summaryId) payload.summaryId = summaryId;
+  if (title) payload.title = title;
   const targets: WebContents[] = [];
   if (hud) targets.push(hud.webContents());
   for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
@@ -1307,7 +1311,21 @@ async function fireSummary(sessionId: string): Promise<void> {
       endedAt: session.ended_at,
     });
     composed.jobStore.setSummaryCompleted(sessionId, result.summaryId, Date.now());
-    broadcastSummaryState(sessionId, 'completed', result.summaryId);
+
+    // Apply the backend-suggested title only when the session has no title
+    // yet — once the user has edited it, we never overwrite. Re-read the
+    // session row (not the cached `session` variable above) because the
+    // user might have set a title while the summary call was in flight.
+    let appliedTitle: string | undefined;
+    if (result.title && result.title.trim().length > 0) {
+      const current = composed.jobStore.getSession(sessionId);
+      if (current && current.title === null) {
+        const cleaned = result.title.trim();
+        composed.jobStore.updateSessionTitle(sessionId, cleaned);
+        appliedTitle = cleaned;
+      }
+    }
+    broadcastSummaryState(sessionId, 'completed', result.summaryId, appliedTitle);
   } catch (err) {
     composed.jobStore.setSummaryFailed(sessionId);
     shell.logger.warn('summary request failed', {

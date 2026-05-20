@@ -295,6 +295,13 @@ export interface SummaryStateChanged {
   readonly status: SummaryStatus;
   /** Populated on `'completed'`; absent otherwise. */
   readonly summaryId?: string;
+  /**
+   * New session title — populated on `'completed'` if the backend
+   * returned one AND main applied it (i.e., the session's title was
+   * NULL). The renderer's session detail view refreshes its EditableTitle
+   * from this so user-edited titles are never overwritten.
+   */
+  readonly title?: string;
 }
 
 export interface SessionRetrySummaryInput {
