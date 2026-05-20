@@ -350,6 +350,13 @@ function AccountCard() {
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Shown when main refuses sign-out because a recording is active. Closes
+   * on backdrop click; re-opens automatically the next time the user clicks
+   * Sign out while still recording, so there's no race-condition where a
+   * fast clicker dismisses-and-presses past the guard.
+   */
+  const [showRecordingBlock, setShowRecordingBlock] = useState(false);
 
   useEffect(() => {
     void window.electronAPI.auth.getState().then((s) => setUser(s.user));
@@ -367,7 +374,10 @@ function AccountCard() {
     setBusy(true);
     setError(null);
     try {
-      await window.electronAPI.auth.signOut();
+      const r = await window.electronAPI.auth.signOut();
+      if (!r.ok && r.error === 'recording_active') {
+        setShowRecordingBlock(true);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -376,36 +386,77 @@ function AccountCard() {
   };
 
   return (
-    <div className="flex items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-      {user.photoUrl ? (
-        <img
-          src={user.photoUrl}
-          alt=""
-          referrerPolicy="no-referrer"
-          className="h-12 w-12 rounded-full border border-zinc-800 object-cover"
-        />
-      ) : (
-        <div className="flex h-12 w-12 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-sm text-zinc-400">
-          {(user.email[0] ?? '?').toUpperCase()}
+    <>
+      <div className="flex items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+        {user.photoUrl ? (
+          <img
+            src={user.photoUrl}
+            alt=""
+            referrerPolicy="no-referrer"
+            className="h-12 w-12 rounded-full border border-zinc-800 object-cover"
+          />
+        ) : (
+          <div className="flex h-12 w-12 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-sm text-zinc-400">
+            {(user.email[0] ?? '?').toUpperCase()}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-zinc-100">
+            {user.name ?? user.email}
+          </div>
+          {user.name ? (
+            <div className="truncate text-xs text-zinc-500">{user.email}</div>
+          ) : null}
+          {error ? <div className="mt-1 text-xs text-red-400">{error}</div> : null}
         </div>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-zinc-100">
-          {user.name ?? user.email}
-        </div>
-        {user.name ? (
-          <div className="truncate text-xs text-zinc-500">{user.email}</div>
-        ) : null}
-        {error ? <div className="mt-1 text-xs text-red-400">{error}</div> : null}
+        <button
+          type="button"
+          onClick={handleSignOut}
+          disabled={busy}
+          className="rounded-md border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+        >
+          {busy ? 'Signing out…' : 'Sign out'}
+        </button>
       </div>
-      <button
-        type="button"
-        onClick={handleSignOut}
-        disabled={busy}
-        className="rounded-md border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+      {showRecordingBlock ? (
+        <RecordingActiveModal onClose={() => setShowRecordingBlock(false)} />
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * "You can't sign out mid-recording" modal. Backdrop click dismisses;
+ * clicking Sign out again while still recording re-fires the IPC and main
+ * still refuses → modal pops again. Stopping the recording first then
+ * clicking Sign out works.
+ */
+function RecordingActiveModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="max-w-sm rounded-lg border border-zinc-800 bg-zinc-950 p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
       >
-        {busy ? 'Signing out…' : 'Sign out'}
-      </button>
+        <div className="text-sm font-medium text-zinc-100">Recording still in progress</div>
+        <div className="mt-2 text-sm text-zinc-400">
+          Please stop the recording before signing out.
+        </div>
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+          >
+            OK
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

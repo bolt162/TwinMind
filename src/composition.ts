@@ -284,10 +284,16 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
   const cfg: AppSettings = loaded.settings;
 
   // ─── Recovery (synchronous, before anything network-y starts) ───────────
-  const recovery = new RecoveryService(jobStore, clock, {
-    ...DEFAULT_RECOVERY_OPTIONS,
-    retentionMs: cfg.privacy.autoDeleteOlderThanDays * 24 * 60 * 60 * 1000,
-  });
+  const recovery = new RecoveryService(
+    jobStore,
+    clock,
+    paths.recordingsDir,
+    {
+      ...DEFAULT_RECOVERY_OPTIONS,
+      retentionMs: cfg.privacy.autoDeleteOlderThanDays * 24 * 60 * 60 * 1000,
+    },
+    logger,
+  );
   const recoveryReport = recovery.recover();
   if (
     recoveryReport.staleSleepSessions +
@@ -296,11 +302,12 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
       recoveryReport.rowsMarkedFileLost +
       recoveryReport.retentionFilesDeleted +
       recoveryReport.crashRecoveredActive +
-      recoveryReport.unresumedDeviceLoss >
+      recoveryReport.unresumedDeviceLoss +
+      recoveryReport.recoveredOrphanWavs >
     0
   ) {
     shell.analytics.track('crash_recovery_performed', {
-      chunks_recovered: recoveryReport.resetUploading,
+      chunks_recovered: recoveryReport.resetUploading + recoveryReport.recoveredOrphanWavs,
       sessions_affected:
         recoveryReport.staleSleepSessions +
         recoveryReport.crashRecoveredActive +
@@ -309,6 +316,7 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
       // sleep-resume timeout from an actual crash recovery.
       crash_recovered_active: recoveryReport.crashRecoveredActive,
       unresumed_device_loss: recoveryReport.unresumedDeviceLoss,
+      recovered_orphan_wavs: recoveryReport.recoveredOrphanWavs,
     });
   }
 
@@ -404,11 +412,21 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
       orchestrator.setMicDevice(nextId);
     },
     async shutdown() {
-      if (orchestrator.state === 'recording') orchestrator.stop('shutdown');
+      const wasRecording = orchestrator.state === 'recording';
+      if (wasRecording) orchestrator.stop('shutdown');
       meetingDetection?.stop();
       diskMonitor.stop();
       await uploadQueue.stop();
-      chunkWriter.abortAll();
+      // If we were recording, finalize any in-flight WAV files into DB
+      // rows so the last chunk doesn't get orphaned (the audio-process's
+      // chunk_closed reply may never land before before-quit kills the
+      // utility process). When not recording, abortAll is the right call —
+      // it just clears the active map (which is empty in that case anyway).
+      if (wasRecording) {
+        chunkWriter.finalizeAllOnShutdown();
+      } else {
+        chunkWriter.abortAll();
+      }
       // Don't flush analytics here — it's shell-owned, shared with the next
       // composed app. Shell.shutdown handles the final flush at app quit.
       db.close();

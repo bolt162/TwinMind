@@ -433,6 +433,18 @@ export interface AuthSignInOutput {
 }
 
 /**
+ * Result of AUTH_SIGN_OUT. Most attempts succeed (`{ ok: true }`); the only
+ * non-success case today is when a recording is in flight — main refuses to
+ * sign the user out while audio is being captured because that would
+ * orphan the in-progress chunks. The renderer shows a "stop the recording
+ * first" modal in that case.
+ */
+export interface AuthSignOutOutput {
+  readonly ok: boolean;
+  readonly error?: 'recording_active';
+}
+
+/**
  * One row from the local user directory. NEVER includes the refresh token —
  * the renderer only needs identity for the welcome screen's "Continue as X"
  * affordance.
@@ -556,7 +568,7 @@ export interface RequestPayloads {
   };
   [REQUEST.AUTH_GET_STATE]: { input: Empty; output: AuthGetStateOutput };
   [REQUEST.AUTH_SIGN_IN]: { input: Empty; output: AuthSignInOutput };
-  [REQUEST.AUTH_SIGN_OUT]: { input: Empty; output: Empty };
+  [REQUEST.AUTH_SIGN_OUT]: { input: Empty; output: AuthSignOutOutput };
   [REQUEST.AUTH_LIST_USERS]: { input: Empty; output: AuthListUsersOutput };
   [REQUEST.AUTH_CANCEL_SIGN_IN]: { input: Empty; output: Empty };
   [REQUEST.STORAGE_IMPORT_LEGACY]: { input: Empty; output: StorageImportLegacyOutput };

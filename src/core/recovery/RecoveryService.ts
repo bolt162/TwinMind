@@ -23,9 +23,17 @@
  */
 
 import fs from 'node:fs';
-import type { JobStore } from '@core/storage/JobStore';
+import path from 'node:path';
+import type { ChunkSource, JobStore } from '@core/storage/JobStore';
 import type { Clock } from '@core/util/Clock';
 import { type Logger, noopLogger } from '@core/observability/Logger';
+
+// WAV format constants — must match WavFileWriter (16 kHz mono int16). Kept
+// duplicated here rather than imported so RecoveryService doesn't drag in
+// the writer module just for two numbers.
+const WAV_HEADER_BYTES = 44;
+const WAV_BYTES_PER_SECOND = 16_000 * 1 * 2; // sample_rate * channels * bytes/sample
+const VALID_CHUNK_SOURCES: readonly ChunkSource[] = ['mic', 'mixed'];
 
 export interface RecoveryOptions {
   /** §11.5: 'uploading' rows untouched longer than this → reset. Default 10 min. */
@@ -67,13 +75,27 @@ export interface RecoveryReport {
    * resumed across restarts. Force-ended with `device_lost_unresumed`.
    */
   unresumedDeviceLoss: number;
+  /**
+   * WAV files in `recordings/<sessionId>/` with no matching `chunks` row.
+   * Happens when the app is force-quit mid-record before the in-flight
+   * chunk's `chunk_closed` reply arrives from the audio-process. The sweep
+   * fixes up the RIFF header (placeholder size fields → real sizes),
+   * inserts a `chunks` row as `captured`, and lets the UploadQueue
+   * transcribe it on next launch.
+   */
+  recoveredOrphanWavs: number;
 }
 
 export class RecoveryService {
-  /** Configure with the store, clock, and recovery thresholds. */
+  /**
+   * Configure with the store, clock, and recovery thresholds.
+   * `recordingsDir` is required for the orphan-WAV sweep; pass `null` in
+   * unit tests that don't touch the filesystem to skip that step.
+   */
   constructor(
     private readonly store: JobStore,
     private readonly clock: Clock,
+    private readonly recordingsDir: string | null,
     private readonly options: RecoveryOptions = DEFAULT_RECOVERY_OPTIONS,
     private readonly logger: Logger = noopLogger,
   ) {}
@@ -92,6 +114,7 @@ export class RecoveryService {
       staleSummaryPending: 0,
       crashRecoveredActive: 0,
       unresumedDeviceLoss: 0,
+      recoveredOrphanWavs: 0,
     };
 
     // 0. Crash recovery — runs FIRST so subsequent sweeps see consistent
@@ -144,8 +167,170 @@ export class RecoveryService {
       report.retentionFilesDeleted++;
     }
 
+    // 7. Orphan-WAV sweep: WAV files in recordings/<sessionId>/ that have no
+    //    matching chunks row. Caused by force-quit (or kernel panic) before
+    //    the in-flight chunk's chunk_closed reply arrived — see
+    //    ChunkWriter.finalizeAllOnShutdown for the graceful path. Recovery
+    //    fixes the RIFF header, inserts a captured chunks row, and lets the
+    //    upload queue transcribe it. Skipped if no recordings dir was wired
+    //    (unit tests).
+    if (this.recordingsDir !== null) {
+      report.recoveredOrphanWavs = this.recoverOrphanWavFiles(this.recordingsDir);
+    }
+
     this.logger.info('recovery completed', { ...report });
     return report;
+  }
+
+  /**
+   * Scan `recordings/<sessionId>/*.wav`; for any file without a chunks row,
+   * fix up the RIFF header and insert a captured chunks row. Idempotent:
+   * a second pass finds no orphans because the first inserted the rows.
+   *
+   * Files in directories whose session_id doesn't exist in the DB are left
+   * alone — they belong to a deleted session and should be cleaned by a
+   * separate cascade-delete path (not this sweep's job).
+   */
+  private recoverOrphanWavFiles(recordingsDir: string): number {
+    let recovered = 0;
+    let sessionDirs: string[];
+    try {
+      sessionDirs = fs.readdirSync(recordingsDir);
+    } catch {
+      // recordings/ doesn't exist yet (fresh install, never recorded). Fine.
+      return 0;
+    }
+    for (const sessionId of sessionDirs) {
+      const sessionDir = path.join(recordingsDir, sessionId);
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(sessionDir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      // Skip directories that don't correspond to known sessions — those
+      // are residue from a deleted session and reviving them would
+      // resurrect data the user explicitly removed.
+      const session = this.store.getSession(sessionId);
+      if (!session) continue;
+
+      // Snapshot existing chunks once per session so we can chain the
+      // orphans after whatever was already persisted.
+      const existing = this.store.listChunksForSession(sessionId);
+      let maxIdx = existing.reduce((acc, c) => Math.max(acc, c.idx), -1);
+      let lastEndMs = existing.reduce((acc, c) => Math.max(acc, c.end_ms), 0);
+
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.wav')) continue;
+        const parsed = parseChunkWavName(entry.name);
+        if (!parsed) continue;
+        if (this.store.getChunk(parsed.chunkId)) continue; // not orphan
+
+        const filePath = path.join(sessionDir, entry.name);
+        const measured = fixupAndMeasureWav(filePath);
+        if (!measured) {
+          // Empty or unreadable file — best effort cleanup.
+          tryUnlink(filePath);
+          continue;
+        }
+
+        maxIdx += 1;
+        const startMs = lastEndMs;
+        const endMs = startMs + measured.durationMs;
+
+        try {
+          this.store.insertChunk({
+            id: parsed.chunkId,
+            session_id: sessionId,
+            idx: maxIdx,
+            source: parsed.source,
+            file_path: filePath,
+            start_ms: startMs,
+            end_ms: endMs,
+            overlap_prefix_ms: 0,
+            duration_ms: measured.durationMs,
+            bytes: measured.bytes,
+            sha256: null,
+            device_boundary: false,
+            sleep_boundary: false,
+          });
+          lastEndMs = endMs;
+          recovered++;
+          this.logger.info('recovery: orphan WAV reconstructed', {
+            sessionId,
+            chunkId: parsed.chunkId,
+            source: parsed.source,
+            durationMs: measured.durationMs,
+            bytes: measured.bytes,
+          });
+        } catch (err) {
+          this.logger.warn('recovery: orphan WAV insertChunk failed', {
+            sessionId,
+            chunkId: parsed.chunkId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+    return recovered;
+  }
+}
+
+/**
+ * Parse a chunk WAV filename of the form `<chunkId>.<source>.wav`. Returns
+ * null when the pattern doesn't match or the source isn't a known
+ * ChunkSource — we don't want to invent rows for files we can't identify.
+ */
+function parseChunkWavName(name: string): { chunkId: string; source: ChunkSource } | null {
+  const withoutExt = name.slice(0, -'.wav'.length);
+  const dot = withoutExt.lastIndexOf('.');
+  if (dot <= 0 || dot >= withoutExt.length - 1) return null;
+  const chunkId = withoutExt.slice(0, dot);
+  const sourceStr = withoutExt.slice(dot + 1);
+  if (!(VALID_CHUNK_SOURCES as readonly string[]).includes(sourceStr)) return null;
+  return { chunkId, source: sourceStr as ChunkSource };
+}
+
+/**
+ * Patch the RIFF chunk-size + data-subchunk-size fields in an orphan WAV
+ * so the file is a valid 16 kHz mono int16 WAV (matching WavFileWriter).
+ * Returns { bytes, durationMs } on success; null if the file is too short
+ * to contain any audio or can't be opened.
+ *
+ * Idempotent — re-running on an already-patched file produces the same
+ * size fields.
+ */
+function fixupAndMeasureWav(filePath: string): { bytes: number; durationMs: number } | null {
+  let fd: number | null = null;
+  try {
+    const stat = fs.statSync(filePath);
+    const totalBytes = stat.size;
+    if (totalBytes <= WAV_HEADER_BYTES) return null;
+    const dataBytes = totalBytes - WAV_HEADER_BYTES;
+
+    fd = fs.openSync(filePath, 'r+');
+    const sizes = Buffer.alloc(4);
+
+    // RIFF chunk size at offset 4 = file size - 8.
+    sizes.writeUInt32LE(totalBytes - 8, 0);
+    fs.writeSync(fd, sizes, 0, 4, 4);
+    // data subchunk size at offset 40 = PCM byte count.
+    sizes.writeUInt32LE(dataBytes, 0);
+    fs.writeSync(fd, sizes, 0, 4, 40);
+    fs.fsyncSync(fd);
+
+    const durationMs = Math.round((dataBytes / WAV_BYTES_PER_SECOND) * 1000);
+    return { bytes: totalBytes, durationMs };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 }
 

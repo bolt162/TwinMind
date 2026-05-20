@@ -402,8 +402,19 @@ function wireIpc(b: IpcBridgeMain): void {
     };
   });
   b.handle(REQUEST.AUTH_SIGN_OUT, async () => {
+    // Sign-out blocks while audio is being captured — abandoning the
+    // session mid-record would orphan the in-flight chunk (no chunk row,
+    // no transcript, file stuck on disk under the old user's data dir).
+    // The renderer's AccountCard shows a modal to the user when it sees
+    // `recording_active`. The auto-sign-out path in TwinMindAuthProvider
+    // (permanent refresh-token errors) calls signOut() directly and is
+    // not affected by this IPC-level guard.
+    const orchState = composed?.orchestrator.state ?? 'idle';
+    if (orchState === 'starting' || orchState === 'recording' || orchState === 'stopping') {
+      return { ok: false, error: 'recording_active' as const };
+    }
     await requireShell().authProvider.signOut();
-    return {};
+    return { ok: true };
   });
   b.handle(REQUEST.AUTH_CANCEL_SIGN_IN, () => {
     // No-op when no signIn is in flight. The provider aborts whichever

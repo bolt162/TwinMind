@@ -198,10 +198,83 @@ export class ChunkWriter {
     return { chunkId: input.chunkId, skipped: false, bytes, durationMs };
   }
 
-  /** Abort + clean up any active chunks (used on session error or shutdown). */
+  /** Abort + clean up any active chunks (used on session error). */
   abortAll(): void {
     for (const [, a] of this.active) a.writer.abort();
     this.active.clear();
+  }
+
+  /**
+   * Persist any active chunks as `captured` on app shutdown. Different from
+   * abortAll(): instead of discarding the in-flight WAV, we finalize it
+   * (writes the RIFF length so the file is a valid WAV) and insert the
+   * `chunks` row. The UploadQueue picks it up on next launch and the chunk
+   * appears in the transcript view — without this the user loses the last
+   * (incomplete) chunk of every interrupted recording.
+   *
+   * We skip VAD here because audio-process never sent its chunk_closed
+   * reply (the shutdown raced ahead) — that reply is where sumSquares /
+   * sampleCount come from. Sending a near-silent chunk to the backend
+   * is wasted work but the result is just an empty transcript; losing the
+   * chunk entirely is the worse failure mode, so this trade-off favors
+   * persistence.
+   *
+   * end_ms is derived from the actual WAV duration (matching the normal
+   * close path), so a session's total duration is correct.
+   *
+   * Returns the count of chunks persisted; used for telemetry / tests.
+   */
+  finalizeAllOnShutdown(): number {
+    let persisted = 0;
+    for (const [chunkId, a] of this.active) {
+      try {
+        const { bytes, dataBytes: _dataBytes, durationMs, filePath } = a.writer.close();
+        if (durationMs <= 0 || bytes <= 0) {
+          // Nothing was ever written (chunk opened but no PCM arrived
+          // before shutdown). Best to discard — an empty file with a
+          // 44-byte header isn't worth a DB row.
+          try {
+            fs.unlinkSync(filePath);
+          } catch {
+            /* best-effort cleanup */
+          }
+          continue;
+        }
+        const endMs = a.meta.startMs + durationMs;
+        this.store.insertChunk({
+          id: a.meta.chunkId,
+          session_id: a.meta.sessionId,
+          idx: a.meta.idx,
+          source: a.meta.source,
+          file_path: filePath,
+          start_ms: a.meta.startMs,
+          end_ms: endMs,
+          overlap_prefix_ms: a.meta.overlapPrefixMs,
+          duration_ms: durationMs,
+          bytes,
+          sha256: null,
+          device_boundary: a.meta.deviceBoundary,
+          sleep_boundary: a.meta.sleepBoundary,
+        });
+        persisted++;
+        this.logger.info('chunk_writer: finalized in-flight chunk on shutdown', {
+          chunkId,
+          sessionId: a.meta.sessionId,
+          durationMs,
+          bytes,
+        });
+      } catch (err) {
+        // close() can throw if the WAV header is so short the writer
+        // can't seek back. Bail on this chunk; the file (if any) stays
+        // on disk and orphan-WAV recovery picks it up on next launch.
+        this.logger.warn('chunk_writer: finalizeAllOnShutdown failed for chunk', {
+          chunkId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    this.active.clear();
+    return persisted;
   }
 
   /**

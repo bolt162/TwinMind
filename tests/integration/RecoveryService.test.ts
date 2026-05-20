@@ -43,7 +43,7 @@ describe('RecoveryService', () => {
   it('auto-ends sleep-paused sessions older than the threshold (§7.10)', () => {
     h.store.markSessionPausedBySleep('s1');
     h.clock.advance(31 * 60 * 1000); // past 30 min default
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.staleSleepSessions).toBe(1);
     expect(h.store.getSession('s1')!.status).toBe('ended');
     expect(h.store.getSession('s1')!.end_reason).toBe('sleep_timeout');
@@ -69,7 +69,7 @@ describe('RecoveryService', () => {
     h.store.recordChunkUploadStart('c1'); // → uploading
 
     h.clock.advance(11 * 60 * 1000); // past 10 min default
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.resetUploading).toBe(1);
     expect(h.store.getChunk('c1')!.state).toBe('captured');
   });
@@ -108,7 +108,7 @@ describe('RecoveryService', () => {
       },
     );
     expect(fs.existsSync(p)).toBe(true); // delete failed
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.orphanCompletedFilesDeleted).toBe(1);
     expect(fs.existsSync(p)).toBe(false);
   });
@@ -131,7 +131,7 @@ describe('RecoveryService', () => {
       sleep_boundary: false,
     });
     // Do not place the file.
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.rowsMarkedFileLost).toBe(1);
     const c = h.store.getChunk('c1')!;
     expect(c.state).toBe('failed_permanent');
@@ -159,13 +159,13 @@ describe('RecoveryService', () => {
     h.store.recordChunkPermanentFailure('c1', 'auth', 'no');
 
     h.clock.advance(31 * 24 * 60 * 60 * 1000); // past 30 days
-    const r = new RecoveryService(h.store, h.clock, DEFAULT_RECOVERY_OPTIONS).recover();
+    const r = new RecoveryService(h.store, h.clock, null, DEFAULT_RECOVERY_OPTIONS).recover();
     expect(r.retentionFilesDeleted).toBe(1);
     expect(fs.existsSync(p)).toBe(false);
     const c = h.store.getChunk('c1')!;
     expect(c.file_deleted_at).not.toBeNull();
     // And on the *next* recovery pass, the same chunk doesn't double-count.
-    const r2 = new RecoveryService(h.store, h.clock, DEFAULT_RECOVERY_OPTIONS).recover();
+    const r2 = new RecoveryService(h.store, h.clock, null, DEFAULT_RECOVERY_OPTIONS).recover();
     expect(r2.retentionFilesDeleted).toBe(0);
     expect(r2.rowsMarkedFileLost).toBe(0);
   });
@@ -176,7 +176,7 @@ describe('RecoveryService', () => {
 
   it('crash-recovers active sessions: status→ended, end_reason=crash_recovered', () => {
     // Default setup creates 's1' with status='active' and no chunks.
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.crashRecoveredActive).toBe(1);
     const s = h.store.getSession('s1')!;
     expect(s.status).toBe('ended');
@@ -201,21 +201,21 @@ describe('RecoveryService', () => {
       device_boundary: false,
       sleep_boundary: false,
     });
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.crashRecoveredActive).toBe(1);
     const s = h.store.getSession('s1')!;
     expect(s.ended_at).toBe(s.started_at + 12_345);
   });
 
   it('idempotent: a second recover() pass touches zero active sessions', () => {
-    new RecoveryService(h.store, h.clock).recover();
-    const r2 = new RecoveryService(h.store, h.clock).recover();
+    new RecoveryService(h.store, h.clock, null).recover();
+    const r2 = new RecoveryService(h.store, h.clock, null).recover();
     expect(r2.crashRecoveredActive).toBe(0);
   });
 
   it('force-ends paused_by_device_loss sessions: end_reason=device_lost_unresumed', () => {
     h.store.markSessionPausedByDeviceLoss('s1');
-    const r = new RecoveryService(h.store, h.clock).recover();
+    const r = new RecoveryService(h.store, h.clock, null).recover();
     expect(r.unresumedDeviceLoss).toBe(1);
     const s = h.store.getSession('s1')!;
     expect(s.status).toBe('ended');
