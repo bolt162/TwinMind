@@ -333,14 +333,6 @@ export interface SessionGetOutput extends SessionListItem {
     /** Length of the 2 s overlap prepended at the start of this chunk; 0 for chunk 0 / dictation. */
     readonly overlapPrefixMs: number;
     readonly text: string;
-    /**
-     * Wall-clock string returned by the backend (verbatim from
-     * /transcribe/choose's `start_time_local`, e.g.
-     * `"02/06/2026, 13:30:48"`). For meetings the renderer slices the
-     * HH:MM portion; for dictation it's currently ignored. Null for older
-     * rows, VAD-skipped chunks, or non-TwinMind providers.
-     */
-    readonly clockTimeLocal: string | null;
   }>;
 }
 
@@ -551,7 +543,6 @@ export interface RequestPayloads {
           readonly endMs: number;
           readonly overlapPrefixMs: number;
           readonly text: string;
-          readonly clockTimeLocal: string | null;
         }>;
       }>;
     };

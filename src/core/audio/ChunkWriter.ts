@@ -338,7 +338,6 @@ export class ChunkWriter {
         model: `rms_dbfs_${this.vad.silenceThresholdDbfs}`,
         language: null,
         confidence: null,
-        clock_time_local: null,
       },
       () => {
         try {

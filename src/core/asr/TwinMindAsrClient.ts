@@ -83,12 +83,6 @@ interface TwinMindResponse {
   /** Actual model the backend ran, when the response includes it (V1 reads this). */
   readonly modelVersion?: string;
   readonly model?: string;
-  /**
-   * Locale-formatted wall-clock time the backend assigned to this chunk
-   * (e.g. `"02/06/2026, 13:30:48"`). The renderer slices HH:MM for the
-   * meeting transcript view. Absent on backends that don't emit it.
-   */
-  readonly start_time_local?: string;
 }
 
 export class TwinMindAsrClient implements IAsrClient {
@@ -256,9 +250,6 @@ export class TwinMindAsrClient implements IAsrClient {
       model: reportedModel,
       durationMs: req.endOffsetMs - req.startOffsetMs,
       ...(json.language ? { language: json.language } : {}),
-      ...(typeof json.start_time_local === 'string' && json.start_time_local.length > 0
-        ? { clockTimeLocal: json.start_time_local }
-        : {}),
     };
   }
 }

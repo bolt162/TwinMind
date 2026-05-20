@@ -41,7 +41,7 @@ export function SessionDetail({ sessionId, onClose }: Props) {
       )}
 
       {data && <SessionHeader data={data} />}
-      {data && <TranscriptList items={data.transcripts} mode={data.mode} />}
+      {data && <TranscriptList items={data.transcripts} />}
     </div>
   );
 }
@@ -261,7 +261,6 @@ function EditableTitle({
 
 function TranscriptList({
   items,
-  mode,
 }: {
   items: ReadonlyArray<{
     chunkId: string;
@@ -269,9 +268,7 @@ function TranscriptList({
     endMs: number;
     overlapPrefixMs: number;
     text: string;
-    clockTimeLocal: string | null;
   }>;
-  mode: 'dictation' | 'meeting';
 }) {
   if (items.length === 0) {
     return (
@@ -289,11 +286,10 @@ function TranscriptList({
         // on the exact target millisecond — no further client-side workaround
         // needed for the floor-rounding flicker.
         const displayStart = t.startMs + t.overlapPrefixMs;
-        const clockHHMM = mode === 'meeting' ? extractHHMM(t.clockTimeLocal) : null;
         return (
           <li key={t.chunkId} className="flex gap-3">
             <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
-              {clockHHMM ?? `${formatTimestamp(displayStart)} – ${formatTimestamp(t.endMs)}`}
+              {formatTimestamp(displayStart)} – {formatTimestamp(t.endMs)}
             </span>
             <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
           </li>
@@ -301,25 +297,6 @@ function TranscriptList({
       })}
     </ol>
   );
-}
-
-/**
- * Pull "HH:MM" out of the backend's locale-formatted clock string. The
- * known format today is `"DD/MM/YYYY, HH:MM:SS"` — we slice the time half
- * after the ", " and trim the seconds. Returns null when the input is
- * absent, malformed, or doesn't contain at least one colon (so the caller
- * falls back to the relative MM:SS timestamp without a layout jitter).
- */
-function extractHHMM(clockTimeLocal: string | null): string | null {
-  if (!clockTimeLocal) return null;
-  const commaIdx = clockTimeLocal.indexOf(', ');
-  const time = commaIdx >= 0 ? clockTimeLocal.slice(commaIdx + 2) : clockTimeLocal;
-  const firstColon = time.indexOf(':');
-  if (firstColon < 0) return null;
-  const secondColon = time.indexOf(':', firstColon + 1);
-  // "13:30:48" → slice up to second colon → "13:30". "13:30" (no seconds)
-  // → use the whole thing.
-  return secondColon > 0 ? time.slice(0, secondColon) : time;
 }
 
 function formatTimestamp(ms: number): string {
