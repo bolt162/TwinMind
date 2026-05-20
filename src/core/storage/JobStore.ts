@@ -246,6 +246,17 @@ export class JobStore {
     return this.stmts.recoverStaleSummaryPending.run().changes;
   }
 
+  /**
+   * Meeting sessions that should auto-fire a summary on next launch: ended,
+   * not currently summarizing, and have at least one transcript-bearing
+   * chunk. Used by the post-recovery sweep in main — if the app crashed
+   * after transcripts landed but before (or during) the summary call, the
+   * user shouldn't have to click "Generate summary" manually.
+   */
+  findMeetingsNeedingSummary(): SessionRow[] {
+    return this.stmts.findMeetingsNeedingSummary.all() as SessionRow[];
+  }
+
   /** Most recently-ended (or active) session's mode. Used by main to route the
    *  HUD's History button to the matching tab (Dictations vs Meetings) after
    *  we split the single Sessions tab into two. Returns null if there are no
@@ -868,6 +879,18 @@ export class JobStore {
         UPDATE sessions
         SET summary_status='failed'
         WHERE summary_status='pending'
+      `),
+      findMeetingsNeedingSummary: this.db.prepare(`
+        SELECT s.*
+        FROM sessions s
+        WHERE s.mode = 'meeting'
+          AND s.ended_at IS NOT NULL
+          AND (s.summary_status IS NULL OR s.summary_status = 'failed')
+          AND EXISTS (
+            SELECT 1 FROM chunks c
+            WHERE c.session_id = s.id AND c.state = 'completed'
+          )
+        ORDER BY s.started_at ASC
       `),
 
       // ── chunks ──

@@ -1200,6 +1200,22 @@ async function swapComposedTo(userId: string | null): Promise<void> {
       micMonitorStatus.serviceStartedAt = Date.now();
       composed.logger.info('meeting_detection_service_started');
     }
+    // Post-recovery: any meeting that ended with transcripts but no summary
+    // (crash mid-summary, or crash before summary ever fired) auto-fires
+    // now so the user doesn't have to click Generate summary manually.
+    // fireSummary is idempotent and the upload queue's onSessionProcessed
+    // path covers the remaining case (orphan chunks that recovered as
+    // `captured` and need to transcribe first — summary fires automatically
+    // when their state reaches `completed`).
+    const candidates = composed.jobStore.findMeetingsNeedingSummary();
+    for (const session of candidates) {
+      void fireSummary(session.id);
+    }
+    if (candidates.length > 0) {
+      composed.logger.info('post-recovery auto-summary fired', {
+        count: candidates.length,
+      });
+    }
   }
 }
 
