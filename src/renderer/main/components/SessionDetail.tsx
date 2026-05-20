@@ -237,7 +237,6 @@ function EditableTitle({
             cancel();
           }
         }}
-        maxLength={50}
         placeholder={`Untitled ${mode}`}
         className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-sm font-medium text-zinc-100 outline-none focus:border-zinc-500"
       />
@@ -250,7 +249,7 @@ function EditableTitle({
         type="button"
         onClick={startEdit}
         title="Click to rename"
-        className="block w-full truncate rounded text-left text-sm font-medium text-zinc-100 hover:bg-zinc-800/60"
+        className="block w-full line-clamp-3 rounded text-left text-sm font-medium text-zinc-100 hover:bg-zinc-800/60"
       >
         {value ?? <span className="text-zinc-400">{`Untitled ${mode}`}</span>}
       </button>

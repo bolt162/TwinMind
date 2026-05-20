@@ -111,21 +111,21 @@ function SessionRow({
         onClick={onOpen}
         className="flex flex-1 items-center gap-3 text-left"
       >
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
           <Icon className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <span className="truncate text-sm font-medium text-zinc-100">
               {session.title ?? `Untitled ${session.mode}`}
             </span>
             {isLive && (
-              <span className="rounded-full bg-red-600/30 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
+              <span className="shrink-0 rounded-full bg-red-600/30 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
                 live
               </span>
             )}
           </div>
-          <div className="text-xs text-zinc-500">
+          <div className="truncate text-xs text-zinc-500">
             {startedAt.toLocaleString()} · {session.mode}
             {session.status === 'paused_by_sleep' && ' · paused by sleep'}
           </div>
@@ -137,7 +137,7 @@ function SessionRow({
           onClick={handleRetry}
           disabled={retrying}
           className={cn(
-            'flex items-center gap-1 rounded-md border border-amber-800/70 bg-amber-900/30 px-2 py-1 text-xs font-medium text-amber-200',
+            'flex shrink-0 items-center gap-1 rounded-md border border-amber-800/70 bg-amber-900/30 px-2 py-1 text-xs font-medium text-amber-200',
             'hover:bg-amber-900/50 disabled:opacity-60',
           )}
           aria-label={`Retry ${session.failedCount} failed chunks`}
@@ -154,7 +154,7 @@ function SessionRow({
             onDelete();
           }
         }}
-        className="rounded-md p-1.5 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-800 hover:text-zinc-200 group-hover:opacity-100"
+        className="shrink-0 rounded-md p-1.5 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-800 hover:text-zinc-200 group-hover:opacity-100"
         aria-label="Delete session"
       >
         <Trash2 className="h-4 w-4" />

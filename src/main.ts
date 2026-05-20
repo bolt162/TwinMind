@@ -344,6 +344,12 @@ function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 480,
     height: 720,
+    // Lock the launch dimensions as the minimum — users can grow the window
+    // but can't shrink past 480×720. Below that the tile/detail layouts get
+    // visually cramped (long titles spill, transcript timestamp + text crowd
+    // each other). Larger is fine; smaller is forbidden by the OS resize handles.
+    minWidth: 480,
+    minHeight: 720,
     show: false,
     backgroundColor: '#09090b',
     webPreferences: {
