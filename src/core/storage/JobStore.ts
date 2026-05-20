@@ -85,6 +85,12 @@ export interface TranscriptRow {
   confidence: number | null;
   created_at: number;
   synced_at: number | null;
+  /**
+   * Verbatim wall-clock string from the backend's /choose response. Renderer
+   * slices "HH:MM" for the meeting transcript view. NULL for older rows /
+   * VAD-skipped chunks / mock provider.
+   */
+  clock_time_local: string | null;
 }
 
 export type MicActivityState =
@@ -138,6 +144,8 @@ export interface TranscriptInput {
   model: string | null;
   language: string | null;
   confidence: number | null;
+  /** Wall-clock string from backend (see TranscriptRow.clock_time_local). */
+  clock_time_local: string | null;
 }
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
@@ -289,6 +297,7 @@ export class JobStore {
       readonly endMs: number;
       readonly overlapPrefixMs: number;
       readonly text: string;
+      readonly clockTimeLocal: string | null;
     }>;
   }> {
     const sessions = this.listSessionsWithFailureCounts(limit).filter(
@@ -301,6 +310,7 @@ export class JobStore {
         end_ms: number;
         overlap_prefix_ms: number;
         text: string;
+        clock_time_local: string | null;
       }>;
       return {
         id: s.id,
@@ -314,6 +324,7 @@ export class JobStore {
           endMs: r.end_ms,
           overlapPrefixMs: r.overlap_prefix_ms,
           text: r.text,
+          clockTimeLocal: r.clock_time_local,
         })),
       };
     });
@@ -364,6 +375,7 @@ export class JobStore {
       readonly endMs: number;
       readonly overlapPrefixMs: number;
       readonly text: string;
+      readonly clockTimeLocal: string | null;
     }>;
   } | null {
     const session = this.getSession(id);
@@ -374,6 +386,7 @@ export class JobStore {
       end_ms: number;
       overlap_prefix_ms: number;
       text: string;
+      clock_time_local: string | null;
     }>;
     return {
       session,
@@ -383,6 +396,7 @@ export class JobStore {
         endMs: r.end_ms,
         overlapPrefixMs: r.overlap_prefix_ms,
         text: r.text,
+        clockTimeLocal: r.clock_time_local,
       })),
     };
   }
@@ -597,6 +611,7 @@ export class JobStore {
         model: transcript.model,
         language: transcript.language,
         confidence: transcript.confidence,
+        clock_time_local: transcript.clock_time_local,
         created_at: now,
       });
       const t = this.stmts.markTranscribed.run({ id: chunkId, now });
@@ -975,9 +990,11 @@ export class JobStore {
       // ── transcripts ──
       insertTranscript: this.db.prepare(`
         INSERT INTO transcripts (
-          chunk_id, text, words_json, provider, model, language, confidence, created_at
+          chunk_id, text, words_json, provider, model, language, confidence,
+          clock_time_local, created_at
         ) VALUES (
-          @chunk_id, @text, @words_json, @provider, @model, @language, @confidence, @created_at
+          @chunk_id, @text, @words_json, @provider, @model, @language, @confidence,
+          @clock_time_local, @created_at
         )
       `),
       getTranscript: this.db.prepare(`SELECT * FROM transcripts WHERE chunk_id=@chunk_id`),
@@ -986,7 +1003,8 @@ export class JobStore {
                c.start_ms AS start_ms,
                c.end_ms AS end_ms,
                c.overlap_prefix_ms AS overlap_prefix_ms,
-               t.text AS text
+               t.text AS text,
+               t.clock_time_local AS clock_time_local
         FROM transcripts t
         JOIN chunks c ON c.id = t.chunk_id
         WHERE c.session_id = @session_id

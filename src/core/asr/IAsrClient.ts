@@ -57,6 +57,14 @@ export interface TranscriptSegment {
   readonly durationMs: number;
   /** BCP-47 language detected by the provider, if any. */
   readonly language?: string;
+  /**
+   * Wall-clock time string the backend returned for this chunk (currently
+   * the `start_time_local` field from /transcribe/choose, e.g.
+   * `"02/06/2026, 13:30:48"`). Stored verbatim — the UI slices HH:MM for
+   * display. Undefined when the provider doesn't emit one (VAD-skip path,
+   * mock provider).
+   */
+  readonly clockTimeLocal?: string;
 }
 
 export interface IAsrClient {

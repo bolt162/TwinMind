@@ -14,6 +14,13 @@ export interface SessionTranscriptItem {
   endMs: number;
   overlapPrefixMs: number;
   text: string;
+  /**
+   * Wall-clock string the backend returned for this chunk's start (e.g.
+   * `"02/06/2026, 13:30:48"`). Meeting transcript view displays HH:MM
+   * from this; dictation ignores it. Null for older rows / VAD-skipped /
+   * non-TwinMind providers.
+   */
+  clockTimeLocal: string | null;
 }
 
 export interface SessionDetailData {

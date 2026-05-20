@@ -13,9 +13,11 @@ import type { Migration } from '../Migrator';
 import { SQL_V1_INITIAL } from './0001_initial';
 import { SQL_V2_PAUSED_BY_DEVICE_LOSS } from './0002_paused_by_device_loss';
 import { SQL_V3_SESSION_SUMMARY } from './0003_session_summary';
+import { SQL_V4_TRANSCRIPT_CLOCK_TIME } from './0004_transcript_clock_time';
 
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: SQL_V1_INITIAL },
   { version: 2, name: 'paused_by_device_loss', sql: SQL_V2_PAUSED_BY_DEVICE_LOSS },
   { version: 3, name: 'session_summary', sql: SQL_V3_SESSION_SUMMARY },
+  { version: 4, name: 'transcript_clock_time', sql: SQL_V4_TRANSCRIPT_CLOCK_TIME },
 ];
