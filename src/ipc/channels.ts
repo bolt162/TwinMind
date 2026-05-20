@@ -333,6 +333,13 @@ export interface SessionGetOutput extends SessionListItem {
     /** Length of the 2 s overlap prepended at the start of this chunk; 0 for chunk 0 / dictation. */
     readonly overlapPrefixMs: number;
     readonly text: string;
+    /**
+     * Wall-clock epoch ms captured on the desktop right before /choose was
+     * called for this chunk. Meeting transcript view renders this as
+     * `HH:MM`. NULL for pre-migration rows + VAD-skipped chunks; renderer
+     * falls back to relative `MM:SS – MM:SS` in that case.
+     */
+    readonly clockTimeMs: number | null;
   }>;
 }
 
@@ -543,6 +550,7 @@ export interface RequestPayloads {
           readonly endMs: number;
           readonly overlapPrefixMs: number;
           readonly text: string;
+          readonly clockTimeMs: number | null;
         }>;
       }>;
     };

@@ -14,6 +14,12 @@ export interface SessionTranscriptItem {
   endMs: number;
   overlapPrefixMs: number;
   text: string;
+  /**
+   * Wall-clock epoch ms captured on the desktop right before /choose was
+   * called for this chunk. Meeting transcript view renders this as
+   * `HH:MM`. Null for pre-migration rows + VAD-skipped chunks.
+   */
+  clockTimeMs: number | null;
 }
 
 export interface SessionDetailData {

@@ -57,6 +57,14 @@ export interface TranscriptSegment {
   readonly durationMs: number;
   /** BCP-47 language detected by the provider, if any. */
   readonly language?: string;
+  /**
+   * Wall-clock epoch ms captured on the desktop immediately before the
+   * chunk is POSTed to the transcribe endpoint. The meeting transcript
+   * view renders this as `HH:MM` (e.g. "14:02") instead of the relative
+   * `MM:SS – MM:SS` range. Undefined for the VAD-skip path (no /choose
+   * call ever happens) and for the mock provider.
+   */
+  readonly clockTimeMs?: number;
 }
 
 export interface IAsrClient {

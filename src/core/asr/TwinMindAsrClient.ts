@@ -118,6 +118,12 @@ export class TwinMindAsrClient implements IAsrClient {
       throw new AsrError('auth', `failed to get access token: ${describeError(err)}`, err);
     }
 
+    // Wall-clock at the moment this chunk is dispatched to /choose. Captured
+    // *before* the first POST so the value reflects the dispatch attempt the
+    // user sees in the UI, not a refresh-retry that may follow. Renderer
+    // formats this as `HH:MM` for meetings.
+    const clockTimeMs = Date.now();
+
     let resp = await this.doRequest(req, audioBytes, filename, accessToken);
 
     // One-shot 401 refresh-retry path. Anything else propagates as-is.
@@ -142,7 +148,7 @@ export class TwinMindAsrClient implements IAsrClient {
       throw new AsrError('unknown', 'failed to parse TwinMind response body', err);
     }
 
-    return this.toSegment(req, json);
+    return this.toSegment(req, json, clockTimeMs);
   }
 
   // ─── Internals ──────────────────────────────────────────────────────────
@@ -227,7 +233,11 @@ export class TwinMindAsrClient implements IAsrClient {
     );
   }
 
-  private toSegment(req: TranscribeRequest, json: TwinMindResponse): TranscriptSegment {
+  private toSegment(
+    req: TranscribeRequest,
+    json: TwinMindResponse,
+    clockTimeMs: number,
+  ): TranscriptSegment {
     const text = (json.transcript ?? json.text ?? '').toString();
     const words: WordTiming[] | undefined = json.words?.map((w) => ({
       word: w.word,
@@ -250,6 +260,7 @@ export class TwinMindAsrClient implements IAsrClient {
       model: reportedModel,
       durationMs: req.endOffsetMs - req.startOffsetMs,
       ...(json.language ? { language: json.language } : {}),
+      clockTimeMs,
     };
   }
 }

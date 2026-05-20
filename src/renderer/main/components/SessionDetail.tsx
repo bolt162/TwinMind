@@ -41,7 +41,7 @@ export function SessionDetail({ sessionId, onClose }: Props) {
       )}
 
       {data && <SessionHeader data={data} />}
-      {data && <TranscriptList items={data.transcripts} />}
+      {data && <TranscriptList items={data.transcripts} mode={data.mode} />}
     </div>
   );
 }
@@ -261,6 +261,7 @@ function EditableTitle({
 
 function TranscriptList({
   items,
+  mode,
 }: {
   items: ReadonlyArray<{
     chunkId: string;
@@ -268,7 +269,9 @@ function TranscriptList({
     endMs: number;
     overlapPrefixMs: number;
     text: string;
+    clockTimeMs: number | null;
   }>;
+  mode: 'dictation' | 'meeting';
 }) {
   if (items.length === 0) {
     return (
@@ -286,10 +289,16 @@ function TranscriptList({
         // on the exact target millisecond — no further client-side workaround
         // needed for the floor-rounding flicker.
         const displayStart = t.startMs + t.overlapPrefixMs;
+        // Meetings: show the wall-clock time at which the chunk was sent
+        // to /choose (e.g. "14:02") instead of the relative range. Falls
+        // back to relative when clockTimeMs is null (pre-migration rows,
+        // VAD-skipped chunks, mock provider).
+        const clockLabel =
+          mode === 'meeting' && t.clockTimeMs !== null ? formatClockHHMM(t.clockTimeMs) : null;
         return (
           <li key={t.chunkId} className="flex gap-3">
             <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
-              {formatTimestamp(displayStart)} – {formatTimestamp(t.endMs)}
+              {clockLabel ?? `${formatTimestamp(displayStart)} – ${formatTimestamp(t.endMs)}`}
             </span>
             <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
           </li>
@@ -297,6 +306,15 @@ function TranscriptList({
       })}
     </ol>
   );
+}
+
+/** Format epoch ms as 24-hour `HH:MM` in the user's locale (e.g. "14:02"). */
+function formatClockHHMM(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 function formatTimestamp(ms: number): string {

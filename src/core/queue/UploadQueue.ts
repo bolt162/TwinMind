@@ -182,6 +182,7 @@ export class UploadQueue {
           model: segment.model,
           language: segment.language ?? null,
           confidence: segment.confidence ?? null,
+          clock_time_ms: segment.clockTimeMs ?? null,
         },
         () => {
           try {
