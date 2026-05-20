@@ -169,4 +169,56 @@ describe('RecoveryService', () => {
     expect(r2.retentionFilesDeleted).toBe(0);
     expect(r2.rowsMarkedFileLost).toBe(0);
   });
+
+  // ─── Crash recovery — active + paused_by_device_loss sessions ────────────
+  // The orchestrator only writes status='active' while recording in-process,
+  // so any survivor at startup is by definition an orphan.
+
+  it('crash-recovers active sessions: status→ended, end_reason=crash_recovered', () => {
+    // Default setup creates 's1' with status='active' and no chunks.
+    const r = new RecoveryService(h.store, h.clock).recover();
+    expect(r.crashRecoveredActive).toBe(1);
+    const s = h.store.getSession('s1')!;
+    expect(s.status).toBe('ended');
+    expect(s.end_reason).toBe('crash_recovered');
+    // No chunks → ended_at falls back to started_at (zero duration).
+    expect(s.ended_at).toBe(s.started_at);
+  });
+
+  it('crash-recovered ended_at reflects last captured chunk_end_ms', () => {
+    h.store.insertChunk({
+      id: 'c1',
+      session_id: 's1',
+      idx: 0,
+      source: 'mixed',
+      file_path: '/tmp/never-read.wav',
+      start_ms: 0,
+      end_ms: 12_345,
+      overlap_prefix_ms: 0,
+      duration_ms: 12_345,
+      bytes: 8,
+      sha256: null,
+      device_boundary: false,
+      sleep_boundary: false,
+    });
+    const r = new RecoveryService(h.store, h.clock).recover();
+    expect(r.crashRecoveredActive).toBe(1);
+    const s = h.store.getSession('s1')!;
+    expect(s.ended_at).toBe(s.started_at + 12_345);
+  });
+
+  it('idempotent: a second recover() pass touches zero active sessions', () => {
+    new RecoveryService(h.store, h.clock).recover();
+    const r2 = new RecoveryService(h.store, h.clock).recover();
+    expect(r2.crashRecoveredActive).toBe(0);
+  });
+
+  it('force-ends paused_by_device_loss sessions: end_reason=device_lost_unresumed', () => {
+    h.store.markSessionPausedByDeviceLoss('s1');
+    const r = new RecoveryService(h.store, h.clock).recover();
+    expect(r.unresumedDeviceLoss).toBe(1);
+    const s = h.store.getSession('s1')!;
+    expect(s.status).toBe('ended');
+    expect(s.end_reason).toBe('device_lost_unresumed');
+  });
 });

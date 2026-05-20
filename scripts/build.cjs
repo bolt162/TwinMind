@@ -13,9 +13,82 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const esbuild = require('esbuild');
+const dotenv = require('dotenv');
 
 const repoRoot = path.resolve(__dirname, '..');
 const distDir = path.join(repoRoot, 'dist');
+
+/**
+ * Env vars baked into the bundle as `process.env.X` → literal-string
+ * replacements via esbuild's `define`. These are PUBLIC identifiers
+ * (Firebase project, OAuth client id, backend URLs, Vercel bypass) — none
+ * are user credentials. The actual secret (the Firebase refresh token) is
+ * encrypted in macOS Keychain at runtime.
+ *
+ * Reading order: real `process.env` first (so CI / launch-time overrides
+ * win), then `.env` in the repo root as a fallback. Vars absent in BOTH
+ * compile to literal `undefined` in the bundle; the runtime
+ * `resolveTwinMindBackendConfig` surfaces them as `missing` to Settings.
+ */
+const BAKED_VARS = [
+  'FIREBASE_WEB_API_KEY',
+  'FIREBASE_TENANT_ID',
+  'FIREBASE_PROJECT_ID',
+  'GOOGLE_OAUTH_CLIENT_ID',
+  'TWINMIND_BACKEND_URL',
+  'VERCEL_PROTECTION_BYPASS',
+  'TWINMIND_TRANSCRIBE_URL',
+  'TWINMIND_SUMMARY_URL',
+  // Optional — fall back to V1's defaults in twinmindBackendConfig.ts when
+  // unset, so missing values aren't surfaced as "Backend not configured".
+  'TWINMIND_DICTATION_MODEL',
+  'TWINMIND_MEETING_MODEL',
+  'TWINMIND_APP_URL',
+];
+
+const OPTIONAL_VARS = new Set([
+  'TWINMIND_DICTATION_MODEL',
+  'TWINMIND_MEETING_MODEL',
+  'TWINMIND_APP_URL',
+]);
+
+/** Subset of BAKED_VARS that the UI surfaces as "missing" if absent. */
+const REQUIRED_VARS = BAKED_VARS.filter((n) => !OPTIONAL_VARS.has(n));
+
+function loadBakedEnv() {
+  // dotenv reads `.env` but does NOT overwrite values already in process.env,
+  // which gives CI / shell-set vars precedence — what we want.
+  dotenv.config({ path: path.join(repoRoot, '.env') });
+  const out = {};
+  const missingRequired = [];
+  for (const name of BAKED_VARS) {
+    const v = process.env[name];
+    if (typeof v === 'string' && v.trim().length > 0) {
+      out[name] = v.trim();
+    } else if (REQUIRED_VARS.includes(name)) {
+      missingRequired.push(name);
+    }
+  }
+  if (missingRequired.length > 0) {
+    console.warn(
+      `▸ build.cjs: missing env vars (Settings → Account will show this list to the user): ${missingRequired.join(', ')}`,
+    );
+  }
+  return out;
+}
+
+/** Build the `define` map esbuild uses to replace process.env.X references. */
+function buildDefineMap() {
+  const baked = loadBakedEnv();
+  const define = {};
+  for (const name of BAKED_VARS) {
+    // JSON.stringify yields a quoted JS string literal; `undefined` → 'undefined'.
+    define[`process.env.${name}`] = JSON.stringify(baked[name] ?? null) === 'null'
+      ? 'undefined'
+      : JSON.stringify(baked[name]);
+  }
+  return define;
+}
 
 /**
  * Native / Electron / worker-spawning deps that must stay external.
@@ -90,6 +163,8 @@ function aliasPlugin() {
   };
 }
 
+const DEFINE = buildDefineMap();
+
 const COMMON = {
   bundle: true,
   platform: 'node',
@@ -98,6 +173,9 @@ const COMMON = {
   sourcemap: 'inline',
   external: EXTERNAL,
   plugins: [aliasPlugin()],
+  // Inline build-time env vars. Only the TwinMind/Firebase/Google PUBLIC
+  // identifiers — see BAKED_VARS for the exhaustive list.
+  define: DEFINE,
   // Electron's `require()` path resolution drops alongside the entry file, so
   // emit each entry into its own subdirectory.
   logLevel: 'info',

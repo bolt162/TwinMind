@@ -46,7 +46,6 @@ export function SettingsPage() {
     }
   };
 
-  const advanced = (draft.advanced ?? {}) as Record<string, unknown>;
   const recording = (draft.recording ?? {}) as Record<string, unknown>;
   const meeting = (draft.meetingDetection ?? {}) as Record<string, unknown>;
   const hotkeys = (draft.hotkeys ?? {}) as Record<string, unknown>;
@@ -54,6 +53,10 @@ export function SettingsPage() {
   return (
     <div className="space-y-6">
       {pendingSave && <div className="text-xs text-zinc-500">Saving…</div>}
+
+      <Section title="Account">
+        <AccountCard />
+      </Section>
 
       <Section title="Meeting auto-detection">
         <Toggle
@@ -88,19 +91,6 @@ export function SettingsPage() {
             Setting a hotkey here disables the Fn (Globe) key.
           </span>
         </div>
-      </Section>
-
-      <Section title="Advanced">
-        <NumberField
-          label="VAD silence threshold (dBFS)"
-          min={-80}
-          max={-20}
-          step={1}
-          value={Number(advanced.vadSilenceThresholdDbfs ?? -50)}
-          onChange={(v) => setPath('advanced.vadSilenceThresholdDbfs', v)}
-          hint="Below this, chunks are skipped (no API call). Default −50 dBFS."
-        />
-        <GroqKeyField />
       </Section>
 
       <DangerZone />
@@ -233,40 +223,6 @@ function Toggle({
   );
 }
 
-function NumberField({
-  label,
-  value,
-  onChange,
-  min,
-  max,
-  step = 1,
-  hint,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min: number;
-  max: number;
-  step?: number;
-  hint?: string;
-}) {
-  return (
-    <label className="block space-y-1">
-      <span className="text-sm">{label}</span>
-      <input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-32 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-sm"
-      />
-      {hint && <span className="block text-xs text-zinc-500">{hint}</span>}
-    </label>
-  );
-}
-
 /**
  * Input device picker. Calls the new `recording_devices.list` IPC on mount
  * and surfaces a select with "System default" + each CoreAudio input
@@ -377,71 +333,79 @@ function InputDeviceField({
 }
 
 /**
- * Groq key field — write-only. The cleartext is encrypted by main via
- * DarwinSecureStorage and persisted in JobStore.kv. The renderer never reads
- * it back; we only ask whether one is set (via settings.hasSecret).
+ * AccountCard — shows the signed-in user + a Sign-out button.
+ *
+ * The auth state arrives via the AUTH_STATE_CHANGED push so this card stays
+ * fresh as tokens rotate. On sign-out, main.ts tears down the per-user
+ * ComposedApp; the renderer's App.tsx receives the push and routes to
+ * SignInScreen, so this component never has to render an "I just signed
+ * out" state — it gets unmounted with the SettingsPage.
  */
-function GroqKeyField() {
-  const [present, setPresent] = useState<boolean | null>(null);
-  const [value, setValue] = useState('');
-  const [saving, setSaving] = useState(false);
+function AccountCard() {
+  const [user, setUser] = useState<{
+    id: string;
+    email: string;
+    name: string | null;
+    photoUrl: string | null;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void window.electronAPI.settings
-      .hasSecret({ name: 'groq_api_key' })
-      .then((r) => setPresent(r.present))
-      .catch(() => setPresent(null));
+    void window.electronAPI.auth.getState().then((s) => setUser(s.user));
+    const unsub = window.electronAPI.on.authStateChanged((s) => setUser(s.user));
+    return () => unsub();
   }, []);
 
-  const save = async (next: string) => {
-    setSaving(true);
+  if (!user) {
+    // Settings is only reachable when authed, but renders during sign-out
+    // race — fall back gracefully rather than crashing.
+    return <p className="text-sm text-zinc-500">Not signed in.</p>;
+  }
+
+  const handleSignOut = async () => {
+    setBusy(true);
     setError(null);
     try {
-      await window.electronAPI.settings.setSecret({ name: 'groq_api_key', value: next });
-      setPresent(next.length > 0);
-      setValue('');
+      await window.electronAPI.auth.signOut();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
 
   return (
-    <div className="space-y-1">
-      <span className="text-sm">Groq API key</span>
-      <div className="flex items-center gap-2">
-        <input
-          type="password"
-          value={value}
-          placeholder={present ? 'Stored — paste new key to replace' : 'paste sk-…'}
-          onChange={(e) => setValue(e.target.value)}
-          className="w-64 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-sm placeholder:text-zinc-600"
+    <div className="flex items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+      {user.photoUrl ? (
+        <img
+          src={user.photoUrl}
+          alt=""
+          referrerPolicy="no-referrer"
+          className="h-12 w-12 rounded-full border border-zinc-800 object-cover"
         />
-        <button
-          type="button"
-          onClick={() => void save(value)}
-          disabled={saving || value.length === 0}
-          className="rounded-md bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-500 disabled:opacity-40"
-        >
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-        {present && (
-          <button
-            type="button"
-            onClick={() => void save('')}
-            disabled={saving}
-            className="text-xs text-zinc-400 hover:text-zinc-200"
-          >
-            Clear
-          </button>
-        )}
+      ) : (
+        <div className="flex h-12 w-12 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-sm text-zinc-400">
+          {(user.email[0] ?? '?').toUpperCase()}
+        </div>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-zinc-100">
+          {user.name ?? user.email}
+        </div>
+        {user.name ? (
+          <div className="truncate text-xs text-zinc-500">{user.email}</div>
+        ) : null}
+        {error ? <div className="mt-1 text-xs text-red-400">{error}</div> : null}
       </div>
-      {error && <p className="text-xs text-red-400">{error}</p>}
-      <p className="text-xs text-zinc-500">
-        Encrypted on disk via the macOS Keychain. The renderer can't read it back.
-      </p>
+      <button
+        type="button"
+        onClick={handleSignOut}
+        disabled={busy}
+        className="rounded-md border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+      >
+        {busy ? 'Signing out…' : 'Sign out'}
+      </button>
     </div>
   );
 }

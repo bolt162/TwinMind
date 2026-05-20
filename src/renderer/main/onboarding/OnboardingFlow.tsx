@@ -1,17 +1,17 @@
 /**
- * OnboardingFlow — multi-step setup wizard.
+ * OnboardingFlow — multi-step PERMISSIONS wizard.
  *
- * Steps (§16.1): welcome → mic permission → audio capture → accessibility →
- * notifications → Groq key → done.
+ * Steps: welcome → mic → audio capture → accessibility → notifications → done.
+ * Sign-in is NOT part of onboarding — it gates the entire app at SignInScreen.
+ * Signing out returns the user to SignInScreen but does NOT rewind the wizard
+ * (permissions are macOS-scoped, so the wizard's gate is too).
  *
- * The flow writes `onboardingCompletedAt` on the last step. App.tsx routes to
- * this component when that field is null. The Groq key step is skippable —
- * users can paste the key later via Settings → Advanced — but transcription
- * won't work until one is provided.
+ * The final step calls `onComplete` which fires the WIZARD_COMPLETE IPC, which
+ * writes the machine-scoped completion marker into GlobalDb.wizard.
  */
 
 import { useEffect, useState } from 'react';
-import { Check, ChevronRight, Mic, Radio, Accessibility, Bell, Key } from 'lucide-react';
+import { Check, ChevronRight, Mic, Radio, Accessibility, Bell } from 'lucide-react';
 import type { Settings } from '../hooks/useSettings';
 import { cn } from '../components/cn';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
@@ -22,23 +22,16 @@ type Step =
   | 'audioCapture'
   | 'accessibility'
   | 'notifications'
-  | 'groqKey'
   | 'done';
 
 interface OnboardingFlowProps {
-  readonly settings: Settings;
-  readonly save: (s: Settings) => Promise<void>;
+  readonly onComplete: () => Promise<void> | void;
 }
 
-export function OnboardingFlow({ settings, save }: OnboardingFlowProps) {
+export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const [step, setStep] = useState<Step>('welcome');
 
   const advance = (next: Step) => setStep(next);
-  const complete = async () => {
-    // Mutate the parent App's settings state, which re-renders App and routes
-    // us to the main Layout (App reads `settings.onboardingCompletedAt`).
-    await save({ ...settings, onboardingCompletedAt: Date.now() });
-  };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-8 text-zinc-100">
@@ -47,9 +40,8 @@ export function OnboardingFlow({ settings, save }: OnboardingFlowProps) {
         {step === 'mic' && <MicStep onNext={() => advance('audioCapture')} />}
         {step === 'audioCapture' && <AudioCaptureStep onNext={() => advance('accessibility')} />}
         {step === 'accessibility' && <AccessibilityStep onNext={() => advance('notifications')} />}
-        {step === 'notifications' && <NotificationsStep onNext={() => advance('groqKey')} />}
-        {step === 'groqKey' && <GroqKeyStep onNext={() => advance('done')} />}
-        {step === 'done' && <DoneStep settings={settings} onComplete={complete} />}
+        {step === 'notifications' && <NotificationsStep onNext={() => advance('done')} />}
+        {step === 'done' && <DoneStep onComplete={onComplete} />}
       </div>
     </div>
   );
@@ -378,66 +370,21 @@ function NotificationsStep({ onNext }: { onNext: () => void }) {
   );
 }
 
-function GroqKeyStep({ onNext }: { onNext: () => void }) {
-  const [value, setValue] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await window.electronAPI.settings.setSecret({ name: 'groq_api_key', value });
-      onNext();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-  return (
-    <>
-      <StepHeader
-        title="Groq API key"
-        subtitle="Needed for transcription. Stored encrypted in your Keychain — never leaves your machine in cleartext."
-      />
-      <div className="mb-4 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        <Key className="h-6 w-6 text-zinc-300" />
-        <input
-          autoFocus
-          type="password"
-          value={value}
-          placeholder="paste sk-…"
-          onChange={(e) => setValue(e.target.value)}
-          className="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm placeholder:text-zinc-600"
-        />
-      </div>
-      {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
-      <p className="mb-4 text-xs text-zinc-500">
-        You can also paste a key later under Settings → Advanced.
-      </p>
-      <div className="flex items-center gap-3">
-        <PrimaryButton onClick={save} disabled={saving || value.length === 0}>
-          {saving ? 'Saving…' : 'Save and continue'}
-        </PrimaryButton>
-        <SecondaryButton onClick={onNext}>Skip for now</SecondaryButton>
-      </div>
-    </>
-  );
-}
-
-function DoneStep({
-  settings,
-  onComplete,
-}: {
-  settings: Settings;
-  onComplete: () => Promise<void>;
-}) {
-  // Render the actual configured hotkey. `hotkeys.primary` is null on a fresh
-  // install (we never inserted a hotkey-picker step in onboarding), in which
-  // case the Fn / Globe key is the default — match the convention used in
-  // HotkeyCaptureField and the HUD.
-  const primary =
-    (settings.hotkeys as { primary?: Hotkey | null } | undefined)?.primary ?? null;
+function DoneStep({ onComplete }: { onComplete: () => Promise<void> | void }) {
+  // Pull the configured hotkey just for the friendly label. Optional — if
+  // settings haven't loaded yet (race) we fall back to "Fn".
+  const [primary, setPrimary] = useState<Hotkey | null>(null);
+  useEffect(() => {
+    void window.electronAPI.settings
+      .get()
+      .then((s) => {
+        const h = (s as { hotkeys?: { primary?: Hotkey | null } }).hotkeys?.primary ?? null;
+        setPrimary(h);
+      })
+      .catch(() => {
+        /* not signed in or transient; the default label is fine */
+      });
+  }, []);
   const hotkeyLabel = primary ? formatHotkey(primary) : 'Fn';
   return (
     <>

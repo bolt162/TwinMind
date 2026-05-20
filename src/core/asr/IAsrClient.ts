@@ -21,6 +21,12 @@ export interface WordTiming {
 export interface TranscribeRequest {
   /** Absolute path to the chunk's WAV file. */
   readonly audioPath: string;
+  /**
+   * Session id this chunk belongs to. Passed to providers that thread
+   * multiple chunks of the same recording together (e.g. TwinMind's
+   * `meeting_id`). Providers that don't need it ignore the field.
+   */
+  readonly sessionId: string;
   readonly mode: 'dictation' | 'meeting';
   /**
    * `'mic'` for dictation (single stream); `'mixed'` for meeting (mic + system

@@ -1,19 +1,32 @@
+// Load `.env` BEFORE anything else reads `process.env`. The bundled
+// main.js sees `dotenv/config` as a side-effect import which calls
+// `dotenv.config({ path: process.cwd() + '/.env' })` synchronously.
+// In dev, `process.cwd()` is the repo root. In a packaged build there's no
+// `.env` and dotenv silently no-ops — production reads from real env.
+import 'dotenv/config';
+
 /**
  * main.ts — Electron entry point.
  *
  * Architecture: §4 (three processes), §5 (composition wires services from
  * interfaces), §7.10 (power events), §8 (meeting auto-detect), §16.1
- * (onboarding gate before recording).
+ * (onboarding gate before recording). Plus the multi-user split: Shell is
+ * machine-scoped; ComposedApp is per-user and rebuilt every sign-in.
  *
  * Responsibilities (in order):
- *   1. `app.whenReady` → spawn the `audio-process` utility process.
- *   2. Build the platform services bundle (Darwin impls of every OS interface).
- *   3. Call composition root with the audio link + platform services.
- *   4. Wire IPC handlers via `IpcBridgeMain`.
- *   5. Create the main BrowserWindow + Wispr-style floating HUD overlay.
- *   6. Wire orchestrator + power monitor + meeting-detect + hotkey + paste.
- *   7. Broadcast orchestrator state changes to all windows.
- *   8. On quit, tear everything down in reverse order.
+ *   1. `app.whenReady` → spawn the audio-process utility process.
+ *   2. Build platform services (Darwin impls).
+ *   3. Build shell (logger, crash, analytics, globalDb, authProvider).
+ *   4. Initialize the auth provider; rehydrate from globalDb if applicable.
+ *   5. If authenticated, build the per-user `ComposedApp` and wire all the
+ *      composed-dependent behaviors (hotkeys, power monitor, meeting-detect,
+ *      paste, device-change, transcription UX, upload queue listeners).
+ *   6. Wire IPC handlers — auth/wizard ones always available, data-touching
+ *      ones gated by `requireComposed()` so signed-out callers get a clean
+ *      `not_signed_in` error rather than a null-deref crash.
+ *   7. On auth_state_changed: dispose the old composed bindings, build the
+ *      new ones. Broadcast AUTH_STATE_CHANGED to all windows.
+ *   8. At quit, tear down composed → shell → audio-process.
  */
 
 import fs from 'node:fs';
@@ -30,7 +43,8 @@ import {
   type WebContents,
 } from 'electron';
 
-import { compose, type ComposedApp, type PlatformServices } from './composition';
+import { buildShell, type ComposedApp, type PlatformServices, type Shell } from './composition';
+import { resolveTwinMindBackendConfig } from '@core/auth/twinmindBackendConfig';
 import { IpcBridgeMain } from '@ipc/bridge.main';
 import { PUSH, REQUEST, type SettingsPayload } from '@ipc/channels';
 import type { AppSettings } from '@core/storage/SettingsStore';
@@ -53,52 +67,40 @@ import type { IGlobeKeyManager } from '@platform/IGlobeKeyManager';
 import { hotkeysEqual, type Hotkey } from '@core/hotkey/HotkeyTypes';
 import { resolveAudioteeBinaryPath } from '@platform/audioteeBinaryPath';
 
-// Isolate V2 userData from any V1 install. macOS is case-insensitive on the
-// default APFS volume, so the V1 productName "TwinMind" and V2's would resolve
-// to the same `~/Library/Application Support/twinmind/` directory — V2 would
-// inherit V1's settings (onboardingCompletedAt set, stale hotkey binding) and
-// skip onboarding on a fresh install. Pinning userData to a V2-specific path
-// keeps the two installs fully separate without changing the visible app name.
-// Must run before any code reads app.getPath('userData').
+// Isolate V2 userData from any V1 install. See HANDOFF / commit notes for why.
 app.setPath('userData', path.join(app.getPath('appData'), 'TwinMind-V2'));
 
+// ─── Module-level state ─────────────────────────────────────────────────────
+
+let shell: Shell | null = null;
 let composed: ComposedApp | null = null;
+let composedBindings: ComposedBindings | null = null;
 let mainWindow: BrowserWindow | null = null;
 let hud: FloatingHudWindow | null = null;
-/**
- * True once `settings.onboardingCompletedAt` is non-null. Gates the HUD
- * visibility and all hotkey-triggered recording actions so neither fires
- * during the onboarding wizard. Flips inside the SETTINGS_SET handler the
- * moment the user finishes onboarding (no restart required).
- */
-let onboardingComplete = false;
 let audioProcessHandle: UtilityProcess | null = null;
 let audioPort: MessagePortMain | null = null;
 let bridge: IpcBridgeMain | null = null;
-let transcriptionUx: TranscriptionUx | null = null;
 let tray: TrayManager | null = null;
+
 /**
- * Currently-applied primary hotkey + its unregister callback. Lets the
- * SETTINGS_SET handler hot-swap the binding when the user captures a new
- * hotkey, without restarting the app.
+ * Machine-scoped UI gate. True once the wizard has been completed at least
+ * once on this machine. Gates the HUD's `revealOnActiveDisplay` so the
+ * floating button doesn't appear during onboarding. Read from
+ * `globalDb.wizard.onboarding_completed_at` at startup; flipped by the
+ * WIZARD_COMPLETE IPC handler.
  */
-let primaryHotkey: Hotkey | null = null;
-let primaryHotkeyUnregister: (() => void) | null = null;
+let onboardingComplete = false;
+
 /**
- * Set by the HOTKEY_CAPTURE_BEGIN IPC. While non-null, the Globe (Fn) handler
- * forwards Fn down/up events to this WebContents as HOTKEY_CAPTURE_KEY
- * pushes *instead of* running them through the gesture recognizer. Lets the
- * picker capture Fn the same way it captures every other modifier.
- *
- * Cleared by HOTKEY_CAPTURE_END or when the WebContents is destroyed.
+ * Set by HOTKEY_CAPTURE_BEGIN. While non-null, the Globe (Fn) handler
+ * forwards Fn down/up events here as HOTKEY_CAPTURE_KEY pushes instead of
+ * running them through the gesture recognizer.
  */
 let hotkeyCaptureWebContents: WebContents | null = null;
+
 /**
  * Diagnostic status for meeting-detection. Surfaced via the
- * DIAGNOSTIC_MEETING_DETECTION_STATUS IPC so the user can see — in the
- * Settings panel — whether the native mic-activity addon loaded at all.
- * If `monitorAvailable === false`, no Meet / Zoom / Chrome session will
- * ever trigger a notification: the watch loop simply isn't running.
+ * DIAGNOSTIC_MEETING_DETECTION_STATUS IPC.
  */
 let micMonitorStatus: {
   monitorAvailable: boolean;
@@ -118,28 +120,31 @@ const MAIN_HTML = path.join(__dirname, '..', 'renderer', 'index.html');
 const HUD_DEV_URL = 'http://localhost:5173/hud.html';
 const MAIN_DEV_URL = 'http://localhost:5173/';
 
-/**
- * Map secret name → JobStore.kv key. composition.ts reads via this same
- * convention (`groq_api_key_enc`) when decrypting; keep them in sync.
- */
-function secretKvKey(name: 'groq_api_key'): string {
-  switch (name) {
-    case 'groq_api_key':
-      return 'groq_api_key_enc';
-  }
-}
+// ─── ComposedBindings ────────────────────────────────────────────────────────
 
 /**
- * macOS "Space dance": briefly tag the window as joinable to any Space so
- * `show()` lands on the user's *current* Space, then re-pin it. Without
- * this, an explicit show teleports the user back to whichever Space the
- * window was last on — which is what made the failure-notification's Open
- * action (and the HUD's History button) feel like a Space yank when the
- * user had moved to a different Space since the window was last visible.
- *
- * Setting `visibleOnFullScreen: false` keeps the main window out of any
- * other app's fullscreen Space — only the HUD opts in to that.
+ * Bundle of everything wired up FOR a specific composed app. Built on every
+ * sign-in; disposed on sign-out. Holds the unregister callbacks for hotkeys
+ * + globe key + power monitor + per-user upload-queue subscriptions, so a
+ * clean dispose returns the app to its pre-auth state with no dangling
+ * listeners.
  */
+interface ComposedBindings {
+  readonly transcriptionUx: TranscriptionUx;
+  readonly primaryHotkey: Hotkey | null;
+  /** Unregister fn for the configurable primary hotkey, if any. */
+  readonly primaryHotkeyUnregister: (() => void) | null;
+  /** Best-effort dispose for the globe-key gesture subscription, if any. */
+  readonly globeKeyDispose: (() => void) | null;
+  readonly powerDispose: () => void;
+  /** Removes the orchestrator state listener that broadcasts recording state. */
+  readonly orchestratorStateDispose: () => void;
+  /** Removes the upload-queue listeners (chunk_completed + chunk_failed_permanent). */
+  readonly uploadQueueDispose: () => void;
+}
+
+// ─── BrowserWindow helpers (unchanged behavior) ─────────────────────────────
+
 function showMainWindowOnCurrentSpace(win: BrowserWindow): void {
   if (process.platform === 'darwin') {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
@@ -150,29 +155,17 @@ function showMainWindowOnCurrentSpace(win: BrowserWindow): void {
   }
 }
 
-/**
- * Bring the main window forward on the user's current Space and navigate to
- * the given tab. Used by:
- *   - MAIN_SHOW_SESSIONS_TAB / MAIN_SHOW_HOME IPC channels (HUD buttons).
- *   - The notification click handler (transcription-failed toast).
- *
- * If the main window was destroyed (user closed it), recreate it. The HUD
- * is a BrowserWindow too, so `getAllWindows().length === 0` is never true
- * while the HUD is alive — `mainWindow` is the authoritative reference.
- */
 function openMainOnTab(tab: 'recording' | 'dictations' | 'meetings' | 'settings'): void {
   const navigate = (wc: WebContents) => {
     if (!bridge) return;
     try {
       bridge.broadcast(wc, PUSH.NAVIGATE_TAB, { tab });
     } catch {
-      /* renderer torn down between emit and broadcast */
+      /* renderer torn down */
     }
   };
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
-    // createMainWindow's ready-to-show handler runs the Space dance; we just
-    // need to navigate to the requested tab once the renderer is alive.
     mainWindow.webContents.once('did-finish-load', () => {
       if (mainWindow) navigate(mainWindow.webContents);
     });
@@ -184,13 +177,6 @@ function openMainOnTab(tab: 'recording' | 'dictations' | 'meetings' | 'settings'
   navigate(mainWindow.webContents);
 }
 
-/**
- * History entry point — wired to the HUD's History button + the failed-
- * transcription notification's Open action. Routes to whichever tab matches
- * the most-recently-touched session's mode (Dictations vs Meetings), falling
- * back to Dictations on a clean install. Also clears the HUD's failed state
- * because the user acknowledged this batch of failures by opening history.
- */
 function openSessionsTab(): void {
   let tab: 'dictations' | 'meetings' = 'dictations';
   try {
@@ -200,27 +186,17 @@ function openSessionsTab(): void {
     /* fall through to default */
   }
   openMainOnTab(tab);
-  transcriptionUx?.onHistoryDismissed();
+  composedBindings?.transcriptionUx.onHistoryDismissed();
 }
 
-/**
- * Home (recording-tab) entry point. Wired to the HUD's small circular Home
- * button. Does NOT dismiss the HUD's failed state — clicking Home is just
- * "open the main app," not "acknowledge failures."
- */
 function openHome(): void {
   openMainOnTab('recording');
 }
 
-/**
- * Spawn audio-process and return the main-side port plus the child handle.
- */
+// ─── audio-process spawn (unchanged) ────────────────────────────────────────
+
 function spawnAudioProcess(): { child: UtilityProcess; port: MessagePortMain } {
   const entry = path.join(__dirname, '..', 'audio-process', 'entry.js');
-  // Pipe stdio explicitly rather than relying on `inherit` — on macOS the
-  // utilityProcess inherit-stdio path sometimes drops output entirely. We
-  // forward each line through main's own stdout/stderr so it shows up in
-  // both the dev terminal and the wrapping pino log via stdout/stderr.
   const child = utilityProcess.fork(entry, [], { stdio: 'pipe' });
   const forward = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) => {
     if (!stream) return;
@@ -236,12 +212,9 @@ function spawnAudioProcess(): { child: UtilityProcess; port: MessagePortMain } {
 
   const { port1, port2 } = new MessageChannelMain();
   child.once('spawn', () => child.postMessage({ type: 'init' }, [port2]));
-  // Surface unexpected exits — without this, audio-process can crash on
-  // startup (e.g., native addon ABI mismatch) and main keeps running, leaving
-  // sessions that capture nothing.
   child.on('exit', (code) => {
-    if (composed) {
-      composed.logger.error('audio-process exited', { code });
+    if (shell) {
+      shell.logger.error('audio-process exited', { code });
     } else {
       console.error(`[main] audio-process exited with code ${code}`);
     }
@@ -249,7 +222,6 @@ function spawnAudioProcess(): { child: UtilityProcess; port: MessagePortMain } {
   return { child, port: port1 };
 }
 
-/** Adapt MessagePortMain → AudioProcessLink. */
 function makeAudioLink(port: MessagePortMain): AudioProcessLink {
   const listeners = new Set<(msg: AudioToMain) => void>();
   port.on('message', (event: Electron.MessageEvent) => {
@@ -268,11 +240,6 @@ function makeAudioLink(port: MessagePortMain): AudioProcessLink {
   };
 }
 
-/**
- * Build the per-OS platform services bundle. macOS impls; the native mic-activity
- * monitor is wrapped in try/catch so a missing native binary doesn't kill startup
- * — meeting auto-detect just becomes unavailable until the addon is built.
- */
 function buildPlatformServices(): PlatformServices {
   const secureStorage = new DarwinSecureStorage();
   const permissions = new DarwinPermissionService();
@@ -282,23 +249,16 @@ function buildPlatformServices(): PlatformServices {
   const deviceMonitor = new DarwinDeviceMonitor();
   let micActivity: IMicActivityMonitor | undefined;
   try {
-    // Lazy import keeps the native addon out of the tree when not built.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { DarwinMicActivityMonitor } = require('@platform/darwin/DarwinMicActivityMonitor');
     micActivity = new DarwinMicActivityMonitor();
     micMonitorStatus.monitorAvailable = true;
-    // Surfaced before the composed logger exists. Console is fine — the
-    // pino transport in dev forwards stdout into the structured log too.
     console.info('[main] mic_activity_monitor_ready ok=true');
   } catch (err) {
-    // Native addon not built → feature gracefully off. composition.ts handles undefined.
-    // Capture WHY so the Settings diagnostic panel can show it instead of a silent void.
     const msg = err instanceof Error ? err.message : String(err);
     micMonitorStatus.monitorLoadError = msg;
     console.warn(`[main] mic_activity_monitor_ready ok=false err=${msg}`);
   }
-  // Globe (Fn) key listener — its own Swift binary, separate from uiohook.
-  // The DarwinGlobeKeyManager itself is a no-op when the binary is missing.
   const globeKey: IGlobeKeyManager = new DarwinGlobeKeyManager();
   return {
     secureStorage,
@@ -312,21 +272,6 @@ function buildPlatformServices(): PlatformServices {
   };
 }
 
-/** Build the main browser window with our preload + sandboxed renderer.
- *
- * V1-style lifecycle (macOS):
- *  - Window is shown on creation and the Dock icon is brought visible.
- *  - When the user closes the window (clicks X), the BrowserWindow is fully
- *    destroyed (Electron's default). The 'closed' handler nulls our ref AND
- *    hides the Dock icon, putting the app into "tray-only" mode.
- *  - Subsequent opens (tray "Home", HUD Home button, Dock-click via
- *    `app.on('activate')`) call createMainWindow() again, which recreates
- *    the window on the user's *current* Space and re-shows the Dock icon.
- *
- * Net effect: while the main window is hidden/destroyed there's no "other
- * Space" for the OS to yank toward during HUD drags / notification clicks.
- * This is the same pattern V1 uses for its Control Panel.
- */
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 480,
@@ -341,10 +286,6 @@ function createMainWindow(): BrowserWindow {
     },
   });
   if (process.platform === 'darwin') {
-    // Explicit pin to the current Space (the default, but state it so it's
-    // not confused with the HUD's setVisibleOnAllWorkspaces(true)). Every
-    // show path routes through showMainWindowOnCurrentSpace, which toggles
-    // this on/off to land on the user's active Space.
     win.setVisibleOnAllWorkspaces(false, { visibleOnFullScreen: false });
   }
   if (process.env.NODE_ENV === 'development') {
@@ -353,104 +294,175 @@ function createMainWindow(): BrowserWindow {
     void win.loadFile(MAIN_HTML);
   }
   win.once('ready-to-show', () => {
-    // Bring the Dock icon visible alongside the main window — V1 toggles
-    // these in lockstep so "has main window" == "has Dock icon".
     if (process.platform === 'darwin') app.dock?.show();
     showMainWindowOnCurrentSpace(win);
   });
   win.on('closed', () => {
     mainWindow = null;
-    // Hide the Dock icon once the main window is gone — the app falls back
-    // to tray-only access. Combined with the destroyed window, this removes
-    // the "main window in another Space" target that the OS would otherwise
-    // yank the user to on any app activation (HUD drag, notification click).
     if (process.platform === 'darwin') app.dock?.hide();
   });
   return win;
 }
 
-/** Register all IPC channels against the composed app. */
-function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
-  // Settings.
-  b.handle(REQUEST.SETTINGS_GET, () => c.settings.load().settings as unknown as SettingsPayload);
+// ─── IPC: guards + handlers ─────────────────────────────────────────────────
+
+/**
+ * Refuse data IPC calls when no user is signed in. The renderer catches the
+ * rejected promise and routes to SignInScreen; we do NOT crash on null deref.
+ */
+function requireComposed(): ComposedApp {
+  if (!composed) {
+    throw new Error('not_signed_in');
+  }
+  return composed;
+}
+
+function requireShell(): Shell {
+  if (!shell) throw new Error('not_initialized');
+  return shell;
+}
+
+function wireIpc(b: IpcBridgeMain): void {
+  // ── Auth (always available — touches shell) ──────────────────────────────
+  b.handle(REQUEST.AUTH_GET_STATE, () => requireShell().authProvider.getViewState());
+  b.handle(REQUEST.AUTH_SIGN_IN, async () => {
+    const r = await requireShell().authProvider.signIn();
+    return {
+      ok: r.ok,
+      ...(r.error ? { error: r.error } : {}),
+      ...(r.message ? { message: r.message } : {}),
+    };
+  });
+  b.handle(REQUEST.AUTH_SIGN_OUT, async () => {
+    await requireShell().authProvider.signOut();
+    return {};
+  });
+  b.handle(REQUEST.AUTH_CANCEL_SIGN_IN, () => {
+    // No-op when no signIn is in flight. The provider aborts whichever
+    // signal is current; the in-flight promise resolves with error='cancelled'.
+    requireShell().authProvider.cancelSignIn();
+    return {};
+  });
+  b.handle(REQUEST.AUTH_LIST_USERS, () => {
+    const rows = requireShell().globalDb.listUsers();
+    return {
+      users: rows.map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        photoUrl: u.photoUrl,
+        lastSignedInAt: u.lastSignedInAt,
+        hasRefreshToken: u.hasRefreshToken,
+      })),
+    };
+  });
+
+  // ── Wizard (always available — touches globalDb) ─────────────────────────
+  b.handle(REQUEST.WIZARD_GET_STATUS, () => ({
+    onboardingCompletedAt: requireShell().globalDb.getOnboardingCompletedAt(),
+  }));
+  b.handle(REQUEST.WIZARD_COMPLETE, () => {
+    const s = requireShell();
+    s.globalDb.setOnboardingCompletedAt(Date.now());
+    onboardingComplete = true;
+    hud?.revealOnActiveDisplay();
+    return {};
+  });
+
+  // ── Permissions (always available — platform.permissions lives on shell) ──
+  b.handle(REQUEST.PERMISSIONS_REQUEST_MIC, async () => ({
+    granted: (await requireShell().platform.permissions.request('mic')) === 'granted',
+  }));
+  b.handle(REQUEST.PERMISSIONS_REQUEST_AUDIO_CAP, async () => ({
+    granted: await probeSystemAudio(requireShell().logger),
+  }));
+  b.handle(REQUEST.PERMISSIONS_REQUEST_ACCESSIBILITY, async () => {
+    const grant = await requireShell().platform.permissions.request('accessibility');
+    return { granted: grant === 'granted' };
+  });
+  b.handle(REQUEST.PERMISSIONS_REQUEST_NOTIFICATIONS, async () => {
+    try {
+      const { Notification: ElectronNotification } = await import('electron');
+      if (ElectronNotification.isSupported()) {
+        const n = new ElectronNotification({
+          title: 'TwinMind',
+          body: "You're all set to receive meeting notifications.",
+          silent: true,
+        });
+        n.show();
+        setTimeout(() => {
+          try {
+            n.close();
+          } catch {
+            /* already gone */
+          }
+        }, 2000);
+      }
+    } catch (err) {
+      requireShell().logger.warn('notifications request: show failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return { granted: true };
+  });
+  b.handle(REQUEST.PERMISSIONS_READ, async ({ kind }) => ({
+    grant: requireShell().platform.permissions.read(kind),
+  }));
+  b.handle(REQUEST.PERMISSIONS_OPEN_SYSTEM_SETTINGS, async ({ kind }) => {
+    await requireShell().platform.permissions.openSystemSettings(kind);
+    return {};
+  });
+
+  // ── Settings (require composed; settings are per-user) ───────────────────
+  b.handle(REQUEST.SETTINGS_GET, () =>
+    requireComposed().settings.load().settings as unknown as SettingsPayload,
+  );
   b.handle(REQUEST.SETTINGS_SET, async (input) => {
+    const c = requireComposed();
     const next = input as unknown as AppSettings;
     c.settings.save(next);
-    // Onboarding-completion transition (null → timestamp): reveal the HUD
-    // and flip the gate that lets hotkeys trigger recording. Subsequent
-    // saves are no-ops here because the flag is already true.
-    if (!onboardingComplete && next.onboardingCompletedAt) {
-      onboardingComplete = true;
-      hud?.revealOnActiveDisplay();
-    }
-    // Hot-reload the primary hotkey if it changed. Avoids the old "restart
-    // the app after changing" hint and matches Wispr-style instant feedback.
+    // Hot-reload the primary hotkey if it changed.
     const nextHotkey = (next.hotkeys?.primary ?? null) as Hotkey | null;
-    if (!hotkeysEqual(primaryHotkey, nextHotkey)) {
-      if (primaryHotkeyUnregister) {
-        primaryHotkeyUnregister();
-        primaryHotkeyUnregister = null;
-      }
-      primaryHotkey = nextHotkey;
-      // A Fn-only hotkey is functionally identical to "no hotkey" — Globe is
-      // the always-on path and uiohook can't observe Fn anyway. Only register
-      // a uiohook binding for non-Fn hotkeys.
-      if (nextHotkey && !isFnOnlyHotkey(nextHotkey)) {
-        primaryHotkeyUnregister = registerPrimaryHotkey(c, nextHotkey);
-      }
-      // Re-evaluate OS-level Fn behavior whenever the hotkey changes. If the
-      // user just switched TO Fn (or cleared their hotkey), neutralize it.
-      // If they switched AWAY from Fn we leave the OS alone — they keep
-      // whatever Fn behavior was last set (we don't restore an "original").
-      ensureFnFreedIfHotkeyIsFn(nextHotkey, c.logger);
-      // Push to all renderers so the HUD chip + future hints refresh live.
+    if (composedBindings && !hotkeysEqual(composedBindings.primaryHotkey, nextHotkey)) {
+      // Re-register: dispose old, attach new on the same composed.
+      composedBindings.primaryHotkeyUnregister?.();
+      const newUnregister =
+        nextHotkey && !isFnOnlyHotkey(nextHotkey) ? registerPrimaryHotkey(c, nextHotkey) : null;
+      composedBindings = {
+        ...composedBindings,
+        primaryHotkey: nextHotkey,
+        primaryHotkeyUnregister: newUnregister,
+      };
+      ensureFnFreedIfHotkeyIsFn(nextHotkey, requireShell().logger);
       broadcastHotkeyChanged(nextHotkey);
     }
-    // Surface every settings save to composition so it can live-react —
-    // currently used to push `recording.inputDeviceId` changes to native
-    // mid-session without waiting for the next start.
     c.notifySettingsChanged();
     return {};
   });
-  b.handle(REQUEST.SETTINGS_SET_SECRET, ({ name, value }) => {
-    // Empty string CLEARS the secret. Otherwise we encrypt and persist.
-    const kvKey = secretKvKey(name);
-    if (value.length === 0) {
-      c.jobStore.deleteKv(kvKey);
-      return {};
-    }
-    if (!c.platform.secureStorage.isAvailable()) {
-      throw new Error('OS keyring is not available; cannot persist secret');
-    }
-    const enc = c.platform.secureStorage.encrypt(value);
-    c.jobStore.setKv(kvKey, enc);
-    return {};
-  });
-  b.handle(REQUEST.SETTINGS_HAS_SECRET, ({ name }) => {
-    return { present: c.jobStore.getKv(secretKvKey(name)) !== undefined };
-  });
 
-  // Sessions.
-  b.handle(REQUEST.SESSION_LIST, ({ limit }) => ({
-    sessions: c.jobStore.listSessionsWithFailureCounts(limit ?? 50).map((s) => {
-      // Use captured-audio duration (max chunk.end_ms) instead of wall-clock
-      // (endedAt − startedAt) so pause-gap time doesn't inflate the display.
-      // Returns 0 when no chunks exist (broken-period sessions); the UI
-      // treats 0 as "nothing recorded yet" by passing null.
-      const audioMs = c.jobStore.getMaxChunkEndMsForSession(s.id);
-      return {
-        id: s.id,
-        mode: s.mode,
-        status: s.status,
-        startedAt: s.started_at,
-        endedAt: s.ended_at,
-        title: s.title,
-        failedCount: s.failed_count,
-        audioDurationMs: audioMs > 0 ? audioMs : null,
-      };
-    }),
-  }));
+  // ── Sessions / dictations / recording (require composed) ─────────────────
+  b.handle(REQUEST.SESSION_LIST, ({ limit }) => {
+    const c = requireComposed();
+    return {
+      sessions: c.jobStore.listSessionsWithFailureCounts(limit ?? 50).map((s) => {
+        const audioMs = c.jobStore.getMaxChunkEndMsForSession(s.id);
+        return {
+          id: s.id,
+          mode: s.mode,
+          status: s.status,
+          startedAt: s.started_at,
+          endedAt: s.ended_at,
+          title: s.title,
+          failedCount: s.failed_count,
+          audioDurationMs: audioMs > 0 ? audioMs : null,
+          summaryStatus: s.summary_status,
+          summaryId: s.summary_id,
+        };
+      }),
+    };
+  });
   b.handle(REQUEST.SESSION_GET, ({ sessionId }) => {
+    const c = requireComposed();
     const r = c.jobStore.getSessionWithTranscripts(sessionId);
     if (!r) throw new Error(`session ${sessionId} not found`);
     const audioMs = c.jobStore.getMaxChunkEndMsForSession(sessionId);
@@ -461,37 +473,66 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
       startedAt: r.session.started_at,
       endedAt: r.session.ended_at,
       title: r.session.title,
-      // SessionGetOutput extends SessionListItem which now carries failedCount.
-      // For the detail view we surface the per-session count too.
       failedCount: c.jobStore.countFailedChunks(sessionId),
       audioDurationMs: audioMs > 0 ? audioMs : null,
+      summaryStatus: r.session.summary_status,
+      summaryId: r.session.summary_id,
       transcripts: r.transcripts,
     };
   });
   b.handle(REQUEST.SESSION_DELETE, ({ sessionId }) => {
-    c.jobStore.deleteSession(sessionId);
+    requireComposed().jobStore.deleteSession(sessionId);
     return {};
   });
   b.handle(REQUEST.SESSION_UPDATE_TITLE, ({ sessionId, title }) => {
-    // Trim then collapse empty string → null so the UI shows the "Untitled
-    // <mode>" fallback consistently regardless of whether the user typed
-    // nothing or whitespace.
     const cleaned = title === null ? null : title.trim() === '' ? null : title.trim();
-    c.jobStore.updateSessionTitle(sessionId, cleaned);
+    requireComposed().jobStore.updateSessionTitle(sessionId, cleaned);
     return {};
   });
-  b.handle(REQUEST.DICTATION_LIST, ({ limit }) => ({
-    dictations: c.jobStore.listDictationsWithTranscripts(limit ?? 50).map((d) => {
-      const audioMs = c.jobStore.getMaxChunkEndMsForSession(d.id);
-      return { ...d, audioDurationMs: audioMs > 0 ? audioMs : null };
-    }),
-  }));
+  b.handle(REQUEST.DICTATION_LIST, ({ limit }) => {
+    const c = requireComposed();
+    return {
+      dictations: c.jobStore.listDictationsWithTranscripts(limit ?? 50).map((d) => {
+        const audioMs = c.jobStore.getMaxChunkEndMsForSession(d.id);
+        return { ...d, audioDurationMs: audioMs > 0 ? audioMs : null };
+      }),
+    };
+  });
   b.handle(REQUEST.SESSION_RETRY_FAILED, ({ sessionId }) => {
+    const c = requireComposed();
     const retriedIds = c.jobStore.resetFailedToCaptured(sessionId);
     if (retriedIds.length > 0) {
-      transcriptionUx?.onRetryRequested(sessionId, retriedIds);
+      composedBindings?.transcriptionUx.onRetryRequested(sessionId, retriedIds);
     }
     return { retried: retriedIds.length };
+  });
+  b.handle(REQUEST.SESSION_RETRY_SUMMARY, async ({ sessionId }) => {
+    // Same code path as the auto-trigger. fireSummary refuses to re-enter
+    // a 'pending' or 'completed' session, so the user clicking the button
+    // multiple times can't double-fire.
+    requireComposed();
+    await fireSummary(sessionId);
+    return {};
+  });
+  b.handle(REQUEST.SESSION_OPEN_SUMMARY, async ({ sessionId }) => {
+    // Main constructs the deep link from the configured TWINMIND_APP_URL and
+    // the session id — the renderer never sees a URL it could spoof. We also
+    // refuse to open the link until the summary is actually completed so the
+    // user doesn't land on a 404 in the web app.
+    const c = requireComposed();
+    const session = c.jobStore.getSession(sessionId);
+    if (!session) throw new Error(`session ${sessionId} not found`);
+    if (session.summary_status !== 'completed') {
+      throw new Error('Summary not ready');
+    }
+    const cfgRes = resolveTwinMindBackendConfig();
+    if (!cfgRes.ok) {
+      throw new Error('Backend not configured');
+    }
+    const url = `${cfgRes.config.appUrl}/m/${encodeURIComponent(sessionId)}`;
+    const { shell: electronShell } = await import('electron');
+    await electronShell.openExternal(url);
+    return {};
   });
   b.handle(REQUEST.MAIN_SHOW_SESSIONS_TAB, () => {
     openSessionsTab();
@@ -502,9 +543,6 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     return {};
   });
   b.handle(REQUEST.HOTKEY_CAPTURE_BEGIN, (_input, ctx) => {
-    // Bind capture to this renderer's webContents. If a previous capture
-    // didn't end cleanly (renderer crashed), this replaces the dangling ref.
-    // Watching 'destroyed' clears the ref defensively too.
     const sender = ctx?.sender as WebContents | undefined;
     hotkeyCaptureWebContents = sender ?? null;
     sender?.once('destroyed', () => {
@@ -522,8 +560,6 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     return {};
   });
   b.handle(REQUEST.RECORDING_LIST_INPUT_DEVICES, () => {
-    // Lazy-require to keep the native addon out of the tree when not built.
-    // Returns [] if the addon failed to load or there are no input devices.
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const native = require('@twinmind/coreaudio-darwin') as {
@@ -541,6 +577,7 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     }
   });
   b.handle(REQUEST.DIAGNOSTIC_MEETING_DETECTION_STATUS, () => {
+    const c = requireComposed();
     const rows = c.jobStore.listMicActivityEvents(50);
     return {
       monitorAvailable: micMonitorStatus.monitorAvailable,
@@ -558,23 +595,20 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     };
   });
 
-  // Recording. Every start path also checks transcriptionUx — we don't start
-  // a new session while chunks from the previous one are still being
-  // processed (the user explicitly asked for this gate).
   b.handle(REQUEST.REC_START_DICTATION, () => {
-    if (transcriptionUx?.isBlockingNewRecording()) return {};
+    const c = requireComposed();
+    if (composedBindings?.transcriptionUx.isBlockingNewRecording()) return {};
     c.orchestrator.startDictation();
     hud?.revealOnActiveDisplay();
     return {};
   });
   b.handle(REQUEST.REC_STOP_DICTATION, () => {
-    c.orchestrator.stop();
+    requireComposed().orchestrator.stop();
     return {};
   });
   b.handle(REQUEST.REC_START_MEETING, ({ title }) => {
-    if (transcriptionUx?.isBlockingNewRecording()) {
-      // Throwing surfaces in the renderer as a rejected promise; the dashboard's
-      // try/finally already swallows it. The HUD spinner is the user-visible signal.
+    const c = requireComposed();
+    if (composedBindings?.transcriptionUx.isBlockingNewRecording()) {
       throw new Error('Busy processing previous recording');
     }
     const sessionId = c.orchestrator.startMeeting({ title });
@@ -582,73 +616,29 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     return { sessionId };
   });
   b.handle(REQUEST.REC_STOP_MEETING, ({ sessionId }) => {
+    const c = requireComposed();
     if (c.orchestrator.currentSessionId === sessionId) c.orchestrator.stop();
     return {};
   });
-
-  // Permissions.
-  b.handle(REQUEST.PERMISSIONS_REQUEST_MIC, async () => ({
-    granted: (await c.platform.permissions.request('mic')) === 'granted',
-  }));
-  b.handle(REQUEST.PERMISSIONS_REQUEST_AUDIO_CAP, async () => ({
-    granted: await probeSystemAudio(c.logger),
-  }));
-  b.handle(REQUEST.PERMISSIONS_REQUEST_ACCESSIBILITY, async () => {
-    // Surface the macOS prompt only. It has its own "Open System Settings"
-    // button that the user clicks to reach the Accessibility pane — the
-    // prompt + that button is the standard Apple-blessed flow. Previously
-    // we also called openSystemSettings('accessibility') here, which opened
-    // the pane TOO; the user then clicked the prompt's button and the pane
-    // opened a *second* time. One mechanism is enough.
-    //
-    // Side-effect we still rely on: this call registers `com.twinmind.app`
-    // in the TCC database so it appears in the Accessibility list (just
-    // unchecked) the moment the pane opens. Result is usually `false` —
-    // user still has to flip the toggle. Onboarding polls afterwards.
-    const grant = await c.platform.permissions.request('accessibility');
-    return { granted: grant === 'granted' };
-  });
-  b.handle(REQUEST.PERMISSIONS_REQUEST_NOTIFICATIONS, async () => {
-    // No macOS API to query notifications state from Electron. Showing a
-    // silent Notification surfaces the OS prompt the first time; we then
-    // report granted optimistically (user can still deny in System Settings
-    // — that just makes future show()s a no-op, no crash).
-    try {
-      const { Notification: ElectronNotification } = await import('electron');
-      if (ElectronNotification.isSupported()) {
-        const n = new ElectronNotification({
-          title: 'TwinMind',
-          body: "You're all set to receive meeting notifications.",
-          silent: true,
-        });
-        n.show();
-        // Auto-dismiss after a couple seconds so it doesn't linger.
-        setTimeout(() => {
-          try {
-            n.close();
-          } catch {
-            /* already gone */
-          }
-        }, 2000);
-      }
-    } catch (err) {
-      c.logger.warn('notifications request: show failed', {
-        message: err instanceof Error ? err.message : String(err),
+  b.handle(REQUEST.REC_RESUME_FROM_DEVICE_LOSS, ({ sessionId, deviceId }) => {
+    const c = requireComposed();
+    const current = c.settings.load().settings;
+    c.settings.save({
+      ...current,
+      recording: { ...current.recording, inputDeviceId: deviceId },
+    });
+    const resumed = c.orchestrator.resumeFromDeviceLoss(deviceId);
+    if (resumed !== sessionId) {
+      c.logger.warn('resumeFromDeviceLoss: sessionId mismatch or no pending session', {
+        requested: sessionId,
+        resumed,
       });
     }
-    return { granted: true };
-  });
-  b.handle(REQUEST.PERMISSIONS_READ, async ({ kind }) => ({
-    grant: c.platform.permissions.read(kind),
-  }));
-  b.handle(REQUEST.PERMISSIONS_OPEN_SYSTEM_SETTINGS, async ({ kind }) => {
-    await c.platform.permissions.openSystemSettings(kind);
     return {};
   });
 
-  // Diagnostic + danger-zone.
   b.handle(REQUEST.DIAGNOSTIC_EXPORT_BUNDLE, () => ({
-    path: path.join(c.userDataDir, 'crash-bundles'),
+    path: path.join(requireComposed().userDataDir, 'crash-bundles'),
   }));
   b.handle(REQUEST.HUD_BEGIN_DRAG, () => {
     hud?.beginDrag();
@@ -666,38 +656,15 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     hud?.setMouseIgnore(ignore);
     return {};
   });
-  b.handle(REQUEST.REC_RESUME_FROM_DEVICE_LOSS, ({ sessionId, deviceId }) => {
-    // Persist the user's pick (so the next session start uses it too) and
-    // resume the paused session with a fresh chunk marked device_boundary.
-    const current = c.settings.load().settings;
-    c.settings.save({
-      ...current,
-      recording: { ...current.recording, inputDeviceId: deviceId },
-    });
-    const resumed = c.orchestrator.resumeFromDeviceLoss(deviceId);
-    if (resumed !== sessionId) {
-      c.logger.warn('resumeFromDeviceLoss: sessionId mismatch or no pending session', {
-        requested: sessionId,
-        resumed,
-      });
-    }
-    return {};
-  });
   b.handle(REQUEST.DATA_DELETE_EVERYTHING, async () => {
-    c.logger.warn('data.deleteEverything invoked — full nuke');
+    const c = requireComposed();
+    c.logger.warn('data.deleteEverything invoked — full nuke for this user');
 
-    // 1. Stop any in-flight recording so we're not racing the audio-process.
     if (c.orchestrator.state === 'recording') {
       c.orchestrator.stop('user_wipe');
     }
-
-    // 2. Pause the upload queue so it can't transition rows while we wipe.
     await c.uploadQueue.stop();
-
-    // 3. Wipe DB rows in a single transaction.
     c.jobStore.wipeAll();
-
-    // 4. Delete every file under <userData>/recordings (best-effort).
     const recDir = path.join(c.userDataDir, 'recordings');
     try {
       fs.rmSync(recDir, { recursive: true, force: true });
@@ -705,18 +672,460 @@ function wireIpc(b: IpcBridgeMain, c: ComposedApp): void {
     } catch (e) {
       c.logger.error('failed to clear recordings dir', { err: String(e) });
     }
-
-    // 5. Restart the queue so the user can keep using the app.
     c.uploadQueue.start();
-
     c.analytics.track('data_deleted', {});
     return {};
   });
+
+  // Legacy-data import — placeholder until step 7 wires the actual file move.
+  b.handle(REQUEST.STORAGE_IMPORT_LEGACY, () => {
+    return { imported: false, sessionsImported: 0 };
+  });
+}
+
+// ─── Hotkey + globe-key (per-user, but the platform manager lives on shell) ──
+
+function isFnOnlyHotkey(h: Hotkey): boolean {
+  return h.modifiers.length === 1 && h.modifiers[0] === 'Fn' && h.key === null;
+}
+
+function ensureFnFreedIfHotkeyIsFn(
+  hotkey: Hotkey | null,
+  logger: Shell['logger'],
+): void {
+  if (process.platform !== 'darwin') return;
+  if (hotkey !== null && !isFnOnlyHotkey(hotkey)) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const native = require('@twinmind/coreaudio-darwin') as {
+      fnUsageType?: () => { get(): number | null; set(value: number): boolean };
+    };
+    const fn = native.fnUsageType?.();
+    if (!fn) return;
+    const current = fn.get();
+    if (current === 0) return;
+    const ok = fn.set(0);
+    logger.info('fn-usage-type set to 0 (Do Nothing)', { previous: current, ok });
+  } catch (err) {
+    logger.warn('fn-usage-type set skipped (native helper unavailable)', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function registerPrimaryHotkey(c: ComposedApp, hotkey: Hotkey): () => void {
+  let primaryHoldStarted = false;
+  // The hotkey is dictation-only. Hold-to-talk is the original short-form
+  // gesture; double-tap starts a CONSTANT dictation (runs until single-tap
+  // stops it). Meeting mode is no longer reachable from the hotkey — the
+  // floating "Take notes" button on the HUD is the only entry point.
+  const gesture = new HotkeyGestureRecognizer({
+    onHoldStart: () => {
+      if (
+        c.orchestrator.state === 'idle' &&
+        !composedBindings?.transcriptionUx.isBlockingNewRecording()
+      ) {
+        c.orchestrator.startDictation();
+        hud?.revealOnActiveDisplay();
+        primaryHoldStarted = true;
+      }
+    },
+    onHoldEnd: () => {
+      if (primaryHoldStarted && c.orchestrator.state === 'recording') {
+        c.orchestrator.stop('user');
+      }
+      primaryHoldStarted = false;
+    },
+    onDoubleTap: () => {
+      if (
+        c.orchestrator.state === 'idle' &&
+        !composedBindings?.transcriptionUx.isBlockingNewRecording()
+      ) {
+        c.orchestrator.startDictation();
+        hud?.revealOnActiveDisplay();
+      }
+    },
+    onSingleTap: () => {
+      // Stop ONLY constant dictation (i.e. the kind started by double-tap or
+      // by the main pill). Single-tap during a meeting is a no-op — meetings
+      // must be stopped from the meeting button.
+      if (c.orchestrator.state === 'recording' && c.orchestrator.snapshot().mode === 'dictation') {
+        c.orchestrator.stop('user');
+      }
+    },
+  });
+  return c.platform.hotkeys.registerPressRelease({
+    hotkey,
+    onPress: () => {
+      if (!onboardingComplete) return;
+      gesture.press();
+    },
+    onRelease: () => {
+      if (!onboardingComplete) return;
+      gesture.release();
+    },
+  });
+}
+
+// ─── Compose-bindings lifecycle ─────────────────────────────────────────────
+
+function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
+  // ─── TranscriptionUx ─────────────────────────────────────────────────────
+  const transcriptionUx = new TranscriptionUx({
+    store: c.jobStore,
+    notifications: s.platform.notifications,
+    broadcastToHud: (state) => {
+      if (!bridge) return;
+      const targets: WebContents[] = [];
+      if (hud) targets.push(hud.webContents());
+      for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+      for (const wc of targets) {
+        try {
+          bridge.broadcast(wc, PUSH.TRANSCRIPTION_UI_STATE, state);
+        } catch {
+          /* renderer gone */
+        }
+      }
+    },
+    openSessionsTab,
+    // Called once every chunk of the session has reached a terminal state.
+    // Two jobs:
+    //   1) Fire the meeting-summary call (no-op for dictation sessions).
+    //   2) For dictation sessions, paste the FULL accumulated transcript
+    //      once — V1's behavior. We don't paste per-chunk because
+    //      mid-session pastes collide with the HUD's device-picker UI
+    //      (Cmd-V eaten by the open dropdown) and with any other moment
+    //      the user is interacting with the HUD. Pasting once at session
+    //      end avoids the whole class of focus-timing bugs.
+    onSessionProcessed: (sessionId) => {
+      void fireSummary(sessionId);
+      const session = c.jobStore.getSession(sessionId);
+      if (session?.mode !== 'dictation') return;
+      const detail = c.jobStore.getSessionWithTranscripts(sessionId);
+      if (!detail) return;
+      // Transcripts come back in chunk-idx order. Drop empties (VAD-skipped
+      // chunks have text=''), join with spaces, paste once. The user sees
+      // the same text appear that the Sessions tab also shows.
+      const text = detail.transcripts
+        .map((t) => t.text.trim())
+        .filter((t) => t.length > 0)
+        .join(' ');
+      if (text.length > 0) {
+        void s.platform.paste.paste(text);
+      }
+    },
+  });
+
+  // ─── Primary hotkey ──────────────────────────────────────────────────────
+  const primary = c.settings.load().settings.hotkeys.primary;
+  const primaryUnreg =
+    primary && !isFnOnlyHotkey(primary) ? registerPrimaryHotkey(c, primary) : null;
+  ensureFnFreedIfHotkeyIsFn(primary, s.logger);
+
+  // ─── Globe (Fn) key ──────────────────────────────────────────────────────
+  let globeKeyDispose: (() => void) | null = null;
+  if (s.platform.globeKey) {
+    const globe = s.platform.globeKey;
+    let globeHoldStarted = false;
+    const globeGesture = new HotkeyGestureRecognizer({
+      onHoldStart: () => {
+        if (
+          c.orchestrator.state === 'idle' &&
+          !transcriptionUx.isBlockingNewRecording()
+        ) {
+          c.orchestrator.startDictation();
+          hud?.revealOnActiveDisplay();
+          globeHoldStarted = true;
+        }
+      },
+      onHoldEnd: () => {
+        if (globeHoldStarted && c.orchestrator.state === 'recording') {
+          c.orchestrator.stop('user');
+        }
+        globeHoldStarted = false;
+      },
+      onDoubleTap: () => {
+        // Globe-key is dictation-only, same rules as the configurable
+        // primary hotkey above. Meeting mode is only reachable via the
+        // floating "Take notes" button on the HUD.
+        if (
+          c.orchestrator.state === 'idle' &&
+          !transcriptionUx.isBlockingNewRecording()
+        ) {
+          c.orchestrator.startDictation();
+          hud?.revealOnActiveDisplay();
+        }
+      },
+      onSingleTap: () => {
+        if (c.orchestrator.state === 'recording' && c.orchestrator.snapshot().mode === 'dictation') {
+          c.orchestrator.stop('user');
+        }
+      },
+    });
+    globe.start();
+    const globeSuppressed = () => primary !== null && !isFnOnlyHotkey(primary);
+    globe.onPress(() => {
+      if (hotkeyCaptureWebContents && bridge) {
+        try {
+          bridge.broadcast(hotkeyCaptureWebContents, PUSH.HOTKEY_CAPTURE_KEY, {
+            kind: 'down',
+            code: 'Fn',
+          });
+        } catch {
+          /* renderer torn down */
+        }
+        return;
+      }
+      if (globeSuppressed()) return;
+      if (!onboardingComplete) return;
+      globeGesture.press();
+    });
+    globe.onRelease(() => {
+      if (hotkeyCaptureWebContents && bridge) {
+        try {
+          bridge.broadcast(hotkeyCaptureWebContents, PUSH.HOTKEY_CAPTURE_KEY, {
+            kind: 'up',
+            code: 'Fn',
+          });
+        } catch {
+          /* renderer torn down */
+        }
+        return;
+      }
+      if (globeSuppressed()) return;
+      if (!onboardingComplete) return;
+      globeGesture.release();
+    });
+    globeKeyDispose = () => globe.stop();
+  }
+
+  // ─── Power monitor ───────────────────────────────────────────────────────
+  const power = new PowerMonitorAdapter({
+    powerMonitor,
+    orchestrator: c.orchestrator,
+    store: c.jobStore,
+    logger: c.logger,
+  });
+  power.onResumePrompt((e) => {
+    s.platform.notifications.show(
+      {
+        title: 'Resume recording?',
+        body: 'Your recording was paused when the Mac went to sleep.',
+        actions: [
+          { id: 'resume', label: 'Resume' },
+          { id: 'end', label: 'End' },
+        ],
+        autoDismissMs: 60_000,
+      },
+      (action) => {
+        if (action === 'resume') {
+          c.orchestrator.startMeeting({ title: `Resumed from ${e.sessionId.slice(0, 8)}` });
+          hud?.revealOnActiveDisplay();
+        }
+      },
+    );
+  });
+
+  // ─── Meeting auto-detection ──────────────────────────────────────────────
+  if (c.meetingDetection) {
+    c.meetingDetection.onMeetingDetected((evt) => {
+      c.analytics.track('meeting_notification_shown', { trigger: 'mic_activity' });
+      const cfg = c.settings.load().settings;
+      if (cfg.meetingDetection.autoStart) {
+        c.orchestrator.startMeeting();
+        c.meetingDetection?.recordOutcome(evt.promptId, 'accepted');
+        c.analytics.track('meeting_notification_outcome', { action: 'accepted' });
+        hud?.revealOnActiveDisplay();
+        return;
+      }
+      s.platform.notifications.show(
+        {
+          title: 'Recording detected',
+          body: 'Start a meeting note?',
+          actions: [{ id: 'start', label: 'Start' }],
+          closeButtonText: 'Dismiss',
+          autoDismissMs: 60_000,
+        },
+        (action) => {
+          const outcome =
+            action === 'start'
+              ? 'accepted'
+              : action === '__timed_out__'
+                ? 'timed_out'
+                : 'dismissed';
+          c.meetingDetection?.recordOutcome(evt.promptId, outcome);
+          c.analytics.track('meeting_notification_outcome', { action: outcome });
+          if (outcome === 'accepted') {
+            c.orchestrator.startMeeting();
+            hud?.revealOnActiveDisplay();
+          }
+        },
+      );
+    });
+  }
+
+  // ─── Device-lost broadcast ───────────────────────────────────────────────
+  c.orchestrator.onDeviceLost(({ sessionId, mode, reason }) => {
+    let devices: ReadonlyArray<{
+      id: string;
+      name: string;
+      isDefault: boolean;
+      kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
+    }> = [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const native = require('@twinmind/coreaudio-darwin') as {
+        listInputDevices?: () => typeof devices;
+      };
+      devices = typeof native.listInputDevices === 'function' ? native.listInputDevices() : [];
+    } catch {
+      /* native not loaded */
+    }
+    if (!bridge) return;
+    const payload = {
+      sessionId,
+      mode,
+      lastDeviceLabel: null,
+      reason,
+      devices,
+    };
+    if (hud) {
+      try {
+        bridge.broadcast(hud.webContents(), PUSH.MIC_DEVICE_LOST, payload);
+      } catch {
+        /* HUD torn down */
+      }
+    }
+    for (const win of BrowserWindow.getAllWindows()) {
+      try {
+        bridge.broadcast(win.webContents, PUSH.MIC_DEVICE_LOST, payload);
+      } catch {
+        /* renderer torn down */
+      }
+    }
+  });
+
+  // ─── Upload queue listeners ──────────────────────────────────────────────
+  const onChunkCompleted = (e: {
+    sessionId: string;
+    chunkId: string;
+    segment: { text: string };
+  }) => {
+    transcriptionUx.onChunkCompleted(e.chunkId);
+    if (e.segment.text.trim() === '') return;
+    const chunk = c.jobStore.getChunk(e.chunkId);
+    if (!chunk) return;
+    // NB: dictation auto-paste happens once at session-end via
+    // TranscriptionUx.onSessionProcessed, NOT here. Per-chunk paste broke
+    // for multi-chunk dictation (device-loss resume, long constant
+    // dictation) because mid-session Cmd-V races the HUD's device-picker
+    // dropdown and lands nowhere visible.
+    if (bridge) {
+      const payload = {
+        sessionId: e.sessionId,
+        chunkId: e.chunkId,
+        source: chunk.source,
+        startMs: chunk.start_ms,
+        endMs: chunk.end_ms,
+        text: e.segment.text,
+      };
+      for (const win of BrowserWindow.getAllWindows()) {
+        try {
+          bridge.broadcast(win.webContents, PUSH.TRANSCRIPT_SEGMENT, payload);
+        } catch {
+          /* renderer gone */
+        }
+      }
+      if (hud) {
+        try {
+          bridge.broadcast(hud.webContents(), PUSH.TRANSCRIPT_SEGMENT, payload);
+        } catch {
+          /* HUD gone */
+        }
+      }
+    }
+  };
+  const onChunkFailedPermanent = (e: { chunkId: string; errorClass: string }) => {
+    transcriptionUx.onChunkFailedPermanent(e.chunkId, e.errorClass);
+  };
+  c.uploadQueue.on('chunk_completed', onChunkCompleted);
+  c.uploadQueue.on('chunk_failed_permanent', onChunkFailedPermanent);
+
+  // ─── Orchestrator state listener (broadcasts recording state) ────────────
+  let prevSnap: { sessionId: string | null; elapsedMs: number } | null = null;
+  const stateListener = (snap: { sessionId: string | null; elapsedMs: number }) => {
+    if (bridge && composed) broadcastRecordingState(bridge, composed);
+    if (prevSnap?.sessionId && snap.sessionId === null) {
+      transcriptionUx.onRecordingStopped(prevSnap.sessionId, prevSnap.elapsedMs);
+    }
+    prevSnap = { sessionId: snap.sessionId, elapsedMs: snap.elapsedMs };
+  };
+  c.orchestrator.on('state_changed', stateListener);
+
+  return {
+    transcriptionUx,
+    primaryHotkey: primary,
+    primaryHotkeyUnregister: primaryUnreg,
+    globeKeyDispose,
+    powerDispose: () => power.destroy(),
+    // orchestrator + uploadQueue listeners die with the composed app:
+    // composed.shutdown() stops the queue (drains in-flight + halts dispatch)
+    // and the orchestrator becomes inert once its store is closed. We don't
+    // remove the listeners explicitly because the underlying EventEmitter
+    // shapes don't expose `off` — and the references are GC'd with composed.
+    orchestratorStateDispose: () => {
+      /* tied to composed.shutdown */
+      void stateListener;
+    },
+    uploadQueueDispose: () => {
+      /* tied to composed.shutdown */
+      void onChunkCompleted;
+      void onChunkFailedPermanent;
+    },
+  };
+}
+
+function detachComposedBindings(b: ComposedBindings): void {
+  b.primaryHotkeyUnregister?.();
+  b.globeKeyDispose?.();
+  b.powerDispose();
+  b.orchestratorStateDispose();
+  b.uploadQueueDispose();
 }
 
 /**
- * Push recording_state_changed to every live webContents (HUD + main window).
+ * Tear down the current composed (if any) and start a fresh one for `userId`.
+ * Used both at startup (if already authenticated) and on auth-state changes.
  */
+async function swapComposedTo(userId: string | null): Promise<void> {
+  const s = requireShell();
+  if (composedBindings) {
+    detachComposedBindings(composedBindings);
+    composedBindings = null;
+  }
+  if (composed) {
+    try {
+      await composed.shutdown();
+    } catch (err) {
+      s.logger.warn('composed shutdown threw', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    composed = null;
+  }
+  if (userId !== null) {
+    composed = s.composeForUser(userId);
+    composedBindings = attachComposedBindings(composed, s);
+    if (composed.meetingDetection) {
+      micMonitorStatus.serviceStarted = true;
+      micMonitorStatus.serviceStartedAt = Date.now();
+      composed.logger.info('meeting_detection_service_started');
+    }
+  }
+}
+
+// ─── Broadcast helpers ──────────────────────────────────────────────────────
+
 function broadcastRecordingState(b: IpcBridgeMain, c: ComposedApp): void {
   const snap = c.orchestrator.snapshot();
   const targets: WebContents[] = [
@@ -732,73 +1141,106 @@ function broadcastRecordingState(b: IpcBridgeMain, c: ComposedApp): void {
         elapsedMs: snap.elapsedMs,
       });
     } catch {
-      // Renderer may have torn down between emit and broadcast.
+      /* renderer gone */
+    }
+  }
+}
+
+function broadcastHotkeyChanged(next: Hotkey | null): void {
+  if (!bridge) return;
+  const payload = { primary: next };
+  const targets: WebContents[] = [];
+  if (hud) targets.push(hud.webContents());
+  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  for (const wc of targets) {
+    try {
+      bridge.broadcast(wc, PUSH.HOTKEY_CHANGED, payload);
+    } catch {
+      /* renderer gone */
+    }
+  }
+}
+
+function broadcastSummaryState(
+  sessionId: string,
+  status: 'pending' | 'completed' | 'failed',
+  summaryId?: string,
+): void {
+  if (!bridge) return;
+  const payload = summaryId ? { sessionId, status, summaryId } : { sessionId, status };
+  const targets: WebContents[] = [];
+  if (hud) targets.push(hud.webContents());
+  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  for (const wc of targets) {
+    try {
+      bridge.broadcast(wc, PUSH.SUMMARY_STATE_CHANGED, payload);
+    } catch {
+      /* renderer gone */
     }
   }
 }
 
 /**
- * Compose a HotkeyGestureRecognizer + the orchestrator gestures it drives,
- * register it via the platform hotkey manager, and return the unregister
- * callback. Used both by initial wireBehaviors and by the SETTINGS_SET
- * handler for hot-reload when the user captures a new hotkey.
+ * Fire a per-meeting summary call. Idempotent: skips when the session
+ * doesn't exist, isn't a meeting, has no end time, or is already pending /
+ * completed. Used by both the auto-trigger (after all chunks land) and the
+ * SESSION_RETRY_SUMMARY IPC.
  */
-/**
- * Fn-only hotkey ({ modifiers:['Fn'], key:null }) is functionally identical
- * to "no hotkey": macOS doesn't expose Fn through uiohook on Cocoa, so we
- * can't register a binding for it. Globe (always-on) handles Fn instead.
- */
-function isFnOnlyHotkey(h: Hotkey): boolean {
-  return h.modifiers.length === 1 && h.modifiers[0] === 'Fn' && h.key === null;
-}
+async function fireSummary(sessionId: string): Promise<void> {
+  if (!composed || !shell) return;
+  const session = composed.jobStore.getSession(sessionId);
+  if (!session) return;
+  if (session.mode !== 'meeting') return;
+  if (session.ended_at == null) return;
+  if (session.summary_status === 'completed' || session.summary_status === 'pending') {
+    return;
+  }
+  // Skip if zero chunks were ever transcribed successfully — backend has
+  // nothing to summarize. Leave summary_status NULL so the UI shows nothing.
+  const hasAnyText = composed.jobStore
+    .listChunksForSession(sessionId)
+    .some((c) => c.state === 'completed');
+  if (!hasAnyText) return;
 
-/**
- * If Fn is the active hotkey, force the macOS "Press 🌐 key to:" preference
- * to "Do Nothing" (AppleFnUsageType=0). With the default value (1, "Show
- * Emoji & Symbols") the OS races our CGEventTap and pops the emoji picker
- * mid-hotkey-press, especially under meeting-mode load. Setting it to 0
- * makes the OS not even try — the race disappears entirely.
- *
- * Only applied when Fn is what TwinMind listens to. If the user picked a
- * different hotkey, we leave their OS Fn behavior alone so they can keep
- * using the emoji picker / input-source switch / system dictation on Fn.
- *
- * Best-effort: any failure to read or write is swallowed. The worst case is
- * the user occasionally seeing the emoji picker flash, which is the same as
- * the pre-fix state — never a regression.
- */
-function ensureFnFreedIfHotkeyIsFn(
-  hotkey: Hotkey | null,
-  logger: ComposedApp['logger'],
-): void {
-  if (process.platform !== 'darwin') return;
-  // Fn is the active hotkey iff there's no primary OR the primary IS Fn.
-  if (hotkey !== null && !isFnOnlyHotkey(hotkey)) return;
+  composed.jobStore.setSummaryPending(sessionId, Date.now());
+  broadcastSummaryState(sessionId, 'pending');
+
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const native = require('@twinmind/coreaudio-darwin') as {
-      fnUsageType?: () => { get(): number | null; set(value: number): boolean };
-    };
-    const fn = native.fnUsageType?.();
-    if (!fn) return;
-    const current = fn.get();
-    if (current === 0) return; // already configured the way we want it
-    const ok = fn.set(0);
-    logger.info('fn-usage-type set to 0 (Do Nothing)', { previous: current, ok });
+    const result = await composed.summaryClient.requestSummary({
+      sessionId,
+      startedAt: session.started_at,
+      endedAt: session.ended_at,
+    });
+    composed.jobStore.setSummaryCompleted(sessionId, result.summaryId, Date.now());
+    broadcastSummaryState(sessionId, 'completed', result.summaryId);
   } catch (err) {
-    logger.warn('fn-usage-type set skipped (native helper unavailable)', {
+    composed.jobStore.setSummaryFailed(sessionId);
+    shell.logger.warn('summary request failed', {
+      sessionId,
       message: err instanceof Error ? err.message : String(err),
     });
+    broadcastSummaryState(sessionId, 'failed');
   }
 }
 
-/**
- * Probe macOS system-audio capture permission by briefly running audiotee.
- * macOS 14.2+ has no introspection API for `NSAudioCaptureUsageDescription`;
- * the OS only triggers the prompt when an actual capture attempt is made.
- * First PCM frame = granted; emit error or 4s timeout = denied.
- */
-async function probeSystemAudio(logger: ComposedApp['logger']): Promise<boolean> {
+function broadcastAuthState(): void {
+  if (!bridge || !shell) return;
+  const payload = shell.authProvider.getViewState();
+  const targets: WebContents[] = [];
+  if (hud) targets.push(hud.webContents());
+  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  for (const wc of targets) {
+    try {
+      bridge.broadcast(wc, PUSH.AUTH_STATE_CHANGED, payload);
+    } catch {
+      /* renderer gone */
+    }
+  }
+}
+
+// ─── System-audio probe (unchanged from previous main.ts) ──────────────────
+
+async function probeSystemAudio(logger: Shell['logger']): Promise<boolean> {
   type AudioTeeCtor = new (opts: {
     sampleRate: number;
     chunkDurationMs: number;
@@ -867,354 +1309,17 @@ async function probeSystemAudio(logger: ComposedApp['logger']): Promise<boolean>
   });
 }
 
-/** Push the new primary hotkey to every renderer so chips refresh live. */
-function broadcastHotkeyChanged(next: Hotkey | null): void {
-  if (!bridge) return;
-  const payload = { primary: next };
-  const targets: WebContents[] = [];
-  if (hud) targets.push(hud.webContents());
-  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
-  for (const wc of targets) {
-    try {
-      bridge.broadcast(wc, PUSH.HOTKEY_CHANGED, payload);
-    } catch {
-      /* renderer gone */
-    }
-  }
-}
+// ─── App lifecycle ──────────────────────────────────────────────────────────
 
-function registerPrimaryHotkey(c: ComposedApp, hotkey: Hotkey): () => void {
-  let primaryHoldStarted = false;
-  const gesture = new HotkeyGestureRecognizer({
-    onHoldStart: () => {
-      if (c.orchestrator.state === 'idle' && !transcriptionUx?.isBlockingNewRecording()) {
-        c.orchestrator.startDictation();
-        hud?.revealOnActiveDisplay();
-        primaryHoldStarted = true;
-      }
-    },
-    onHoldEnd: () => {
-      if (primaryHoldStarted && c.orchestrator.state === 'recording') {
-        c.orchestrator.stop('user');
-      }
-      primaryHoldStarted = false;
-    },
-    onDoubleTap: () => {
-      if (c.orchestrator.state === 'idle' && !transcriptionUx?.isBlockingNewRecording()) {
-        c.orchestrator.startMeeting();
-        hud?.revealOnActiveDisplay();
-      }
-    },
-    onSingleTap: () => {
-      if (
-        c.orchestrator.state === 'recording' &&
-        c.orchestrator.snapshot().mode === 'meeting'
-      ) {
-        c.orchestrator.stop('user');
-      }
-    },
-  });
-  return c.platform.hotkeys.registerPressRelease({
-    hotkey,
-    onPress: () => {
-      // Skip while user is still in onboarding — see comment in the Globe
-      // press handler for the rationale.
-      if (!onboardingComplete) return;
-      gesture.press();
-    },
-    onRelease: () => {
-      if (!onboardingComplete) return;
-      gesture.release();
-    },
-  });
-}
-
-/**
- * Wire higher-order behavior that crosses module boundaries:
- *   - hotkeys → orchestrator
- *   - power monitor → orchestrator + resume prompt
- *   - meeting-detection → notification → orchestrator (or auto-start)
- *   - dictation completion → paste service
- *   - device-change events → device monitor → orchestrator (forward)
- */
-function wireBehaviors(c: ComposedApp): void {
-  // ─── Hotkeys ────────────────────────────────────────────────────────────
-  // The configurable hotkey (settings.hotkeys.primary) is *opt-in* — out of
-  // the box only the Globe (Fn) key triggers recording. If the user captures
-  // a hotkey in Settings → Hotkeys, we register the same gesture set on it:
-  // hold → dictation, double-tap → meeting, single-tap → stop.
-  //
-  // Re-applied via applyPrimaryHotkey whenever SETTINGS_SET changes the
-  // binding, so the user doesn't need to restart the app.
-  primaryHotkey = c.settings.load().settings.hotkeys.primary;
-  if (primaryHotkey && !isFnOnlyHotkey(primaryHotkey)) {
-    primaryHotkeyUnregister = registerPrimaryHotkey(c, primaryHotkey);
-  }
-  // Silent on every launch: neutralize the OS-level Fn behavior if Fn is our
-  // hotkey, so the emoji picker never races our CGEventTap. No-op if the
-  // user picked a non-Fn hotkey, and no-op if it's already set to 0.
-  ensureFnFreedIfHotkeyIsFn(primaryHotkey, c.logger);
-
-  // ─── Globe (Fn) key: same gesture set as the primary hotkey ─────────────
-  // Hold → dictation, double-tap → start meeting, single-tap → stop meeting.
-  // Routed through its own HotkeyGestureRecognizer so the timer state is
-  // independent of the primary hotkey (different physical key, can be
-  // pressed concurrently).
-  //
-  // Gated by `primaryHotkey`: if the user has configured a primary, the Fn
-  // key is silenced. The configured hotkey replaces Fn, never duplicates it.
-  // Clearing the primary in Settings re-enables Fn instantly.
-  if (c.platform.globeKey) {
-    const globe = c.platform.globeKey;
-    let globeHoldStarted = false;
-    const globeGesture = new HotkeyGestureRecognizer({
-      onHoldStart: () => {
-        if (c.orchestrator.state === 'idle' && !transcriptionUx?.isBlockingNewRecording()) {
-          c.orchestrator.startDictation();
-          hud?.revealOnActiveDisplay();
-          globeHoldStarted = true;
-        }
-      },
-      onHoldEnd: () => {
-        if (globeHoldStarted && c.orchestrator.state === 'recording') {
-          c.orchestrator.stop('user');
-        }
-        globeHoldStarted = false;
-      },
-      onDoubleTap: () => {
-        if (c.orchestrator.state === 'idle' && !transcriptionUx?.isBlockingNewRecording()) {
-          c.orchestrator.startMeeting();
-          hud?.revealOnActiveDisplay();
-        }
-      },
-      onSingleTap: () => {
-        if (c.orchestrator.state === 'recording' && c.orchestrator.snapshot().mode === 'meeting') {
-          c.orchestrator.stop('user');
-        }
-      },
-    });
-    globe.start();
-    // Silence Globe only when the user has picked a *different* hotkey. A
-    // Fn-only primary means "use Fn" — Globe is exactly what we want firing.
-    const globeSuppressed = () => primaryHotkey !== null && !isFnOnlyHotkey(primaryHotkey);
-    globe.onPress(() => {
-      // Capture-mode override: route the Fn press to the picker instead of
-      // the gesture. Takes priority over the suppression check — the picker
-      // needs Fn events regardless of the currently-installed primary.
-      if (hotkeyCaptureWebContents && bridge) {
-        try {
-          bridge.broadcast(hotkeyCaptureWebContents, PUSH.HOTKEY_CAPTURE_KEY, {
-            kind: 'down',
-            code: 'Fn',
-          });
-        } catch {
-          /* renderer torn down */
-        }
-        return;
-      }
-      if (globeSuppressed()) return;
-      // Block hotkey-triggered recording while the user is still in
-      // onboarding. Onboarding has its own UI; Fn shouldn't kick off a
-      // session behind it.
-      if (!onboardingComplete) return;
-      globeGesture.press();
-    });
-    globe.onRelease(() => {
-      if (hotkeyCaptureWebContents && bridge) {
-        try {
-          bridge.broadcast(hotkeyCaptureWebContents, PUSH.HOTKEY_CAPTURE_KEY, {
-            kind: 'up',
-            code: 'Fn',
-          });
-        } catch {
-          /* renderer torn down */
-        }
-        return;
-      }
-      if (globeSuppressed()) return;
-      if (!onboardingComplete) return;
-      globeGesture.release();
-    });
-  }
-
-  // ─── Power monitor ──────────────────────────────────────────────────────
-  const power = new PowerMonitorAdapter({
-    powerMonitor,
-    orchestrator: c.orchestrator,
-    store: c.jobStore,
-    logger: c.logger,
-  });
-  power.onResumePrompt((e) => {
-    c.platform.notifications.show(
-      {
-        title: 'Resume recording?',
-        body: 'Your recording was paused when the Mac went to sleep.',
-        actions: [
-          { id: 'resume', label: 'Resume' },
-          { id: 'end', label: 'End' },
-        ],
-        autoDismissMs: 60_000,
-      },
-      (action) => {
-        if (action === 'resume') {
-          // Start a fresh session; recovery already ended the old one or it
-          // will time-out per §11.5 auto-end. Real "stitch" of old+new
-          // sessions is a future enhancement.
-          c.orchestrator.startMeeting({ title: `Resumed from ${e.sessionId.slice(0, 8)}` });
-          hud?.revealOnActiveDisplay();
-        }
-      },
-    );
-  });
-
-  // ─── Meeting auto-detection ─────────────────────────────────────────────
-  if (c.meetingDetection) {
-    c.meetingDetection.onMeetingDetected((evt) => {
-      c.analytics.track('meeting_notification_shown', { trigger: 'mic_activity' });
-      const cfg = c.settings.load().settings;
-      // Auto-start mode: skip the notification entirely.
-      if (cfg.meetingDetection.autoStart) {
-        c.orchestrator.startMeeting();
-        c.meetingDetection?.recordOutcome(evt.promptId, 'accepted');
-        c.analytics.track('meeting_notification_outcome', { action: 'accepted' });
-        hud?.revealOnActiveDisplay();
-        return;
-      }
-      c.platform.notifications.show(
-        {
-          title: 'Recording detected',
-          body: 'Start a meeting note?',
-          // Single inline "Start" action plus a labelled close button so both
-          // affordances surface on macOS Banner-style notifications (multi-
-          // action arrays get folded into an Options dropdown otherwise).
-          actions: [{ id: 'start', label: 'Start' }],
-          closeButtonText: 'Dismiss',
-          autoDismissMs: 60_000,
-        },
-        (action) => {
-          const outcome =
-            action === 'start'
-              ? 'accepted'
-              : action === '__timed_out__'
-                ? 'timed_out'
-                : 'dismissed';
-          c.meetingDetection?.recordOutcome(evt.promptId, outcome);
-          c.analytics.track('meeting_notification_outcome', { action: outcome });
-          if (outcome === 'accepted') {
-            c.orchestrator.startMeeting();
-            hud?.revealOnActiveDisplay();
-          }
-        },
-      );
-    });
-  }
-
-  // ─── Pinned-device-disappeared → push to HUD with device picker ────────
-  // The orchestrator transitions to paused-by-device-loss; we snapshot the
-  // current device list (with the now-missing pinned entry filtered out)
-  // and broadcast so the HUD can render its inline picker + Resume button.
-  c.orchestrator.onDeviceLost(({ sessionId, mode, reason }) => {
-    let devices: ReadonlyArray<{
-      id: string;
-      name: string;
-      isDefault: boolean;
-      kind: 'built_in' | 'bluetooth' | 'usb' | 'other';
-    }> = [];
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const native = require('@twinmind/coreaudio-darwin') as {
-        listInputDevices?: () => typeof devices;
-      };
-      devices = typeof native.listInputDevices === 'function' ? native.listInputDevices() : [];
-    } catch {
-      /* native not loaded; HUD still shows the panel with just "Auto-detect" */
-    }
-    if (!bridge) return;
-    const payload = {
-      sessionId,
-      mode,
-      lastDeviceLabel: null, // best-effort; native doesn't surface the gone-device label
-      reason,
-      devices,
-    };
-    if (hud) {
-      try {
-        bridge.broadcast(hud.webContents(), PUSH.MIC_DEVICE_LOST, payload);
-      } catch {
-        /* HUD torn down between emit + broadcast */
-      }
-    }
-    for (const win of BrowserWindow.getAllWindows()) {
-      try {
-        bridge.broadcast(win.webContents, PUSH.MIC_DEVICE_LOST, payload);
-      } catch {
-        /* renderer torn down between emit + broadcast */
-      }
-    }
-  });
-
-  // ─── Chunk completion → paste (dictation) + broadcast (all modes) ───────
-  c.uploadQueue.on('chunk_completed', (e) => {
-    // Drive the retry/notification state machine before doing anything else.
-    transcriptionUx?.onChunkCompleted(e.chunkId);
-    if (e.segment.text.trim() === '') return;
-    const chunk = c.jobStore.getChunk(e.chunkId);
-    if (!chunk) return;
-    // Paste only for dictation (mic source); meetings stay in the Sessions tab.
-    if (chunk.source === 'mic') {
-      void c.platform.paste.paste(e.segment.text);
-    }
-    // Broadcast to every live renderer so the SessionDetail / HUD can update
-    // incrementally as chunks land, instead of waiting for the session to end.
-    if (bridge) {
-      const payload = {
-        sessionId: e.sessionId,
-        chunkId: e.chunkId,
-        source: chunk.source,
-        startMs: chunk.start_ms,
-        endMs: chunk.end_ms,
-        text: e.segment.text,
-      };
-      for (const win of BrowserWindow.getAllWindows()) {
-        try {
-          bridge.broadcast(win.webContents, PUSH.TRANSCRIPT_SEGMENT, payload);
-        } catch {
-          /* renderer torn down between emit + broadcast */
-        }
-      }
-      if (hud) {
-        try {
-          bridge.broadcast(hud.webContents(), PUSH.TRANSCRIPT_SEGMENT, payload);
-        } catch {
-          /* HUD torn down */
-        }
-      }
-    }
-  });
-
-  // ─── Permanent chunk failures → retry UX state machine ─────────────────
-  c.uploadQueue.on('chunk_failed_permanent', (e) => {
-    transcriptionUx?.onChunkFailedPermanent(e.chunkId, e.errorClass);
-  });
-
-  // ─── Device-change events ───────────────────────────────────────────────
-  // The audio-process emits `device_change` messages; forward them to the
-  // platform monitor so anything that needs them (UI toasts, telemetry) has
-  // a single subscription point.
-  c.platform.deviceMonitor.start();
-}
-
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // 1. audio-process + platform
   const spawned = spawnAudioProcess();
   audioProcessHandle = spawned.child;
   audioPort = spawned.port;
-
   const audioLink = makeAudioLink(audioPort);
-
-  // Surface audio-process `device_change` to the DarwinDeviceMonitor for
-  // unified event distribution (registered before compose so deviceMonitor
-  // can receive events as soon as it starts).
   const platform = buildPlatformServices();
+
+  // Surface audio-process events.
   audioLink.on((msg) => {
     if (msg.type === 'device_change') {
       (platform.deviceMonitor as DarwinDeviceMonitor).emit({
@@ -1225,7 +1330,6 @@ app.whenReady().then(() => {
       return;
     }
     if (msg.type === 'amplitude_sample') {
-      // Push to the HUD only — main window doesn't need 10 Hz updates.
       if (hud && bridge) {
         try {
           bridge.broadcast(hud.webContents(), PUSH.AMPLITUDE_SAMPLE, {
@@ -1233,29 +1337,20 @@ app.whenReady().then(() => {
             audioClockMs: msg.audioClockMs,
           });
         } catch {
-          /* HUD torn down between emit and broadcast */
+          /* HUD gone */
         }
       }
       return;
     }
     if (msg.type === 'chunk_closed') {
-      // The orchestrator's link.on listener was registered BEFORE this one
-      // (orchestrator subscribes in its constructor; we subscribe in
-      // app.whenReady AFTER compose returns). Listeners fan out in insertion
-      // order, so by this point ChunkWriter.closeChunk has already persisted
-      // the chunk row. Look up its session and let TranscriptionUx re-check
-      // whether the session is fully done.
       const chunk = composed?.jobStore.getChunk(msg.chunkId);
-      if (chunk && transcriptionUx) transcriptionUx.onChunkPersisted(chunk.session_id);
+      if (chunk && composedBindings) {
+        composedBindings.transcriptionUx.onChunkPersisted(chunk.session_id);
+      }
     }
     if (msg.type === 'mic_rebound') {
-      // The audio-process just successfully swapped the mic to whatever the
-      // new system default is. Tell the user briefly — recording continues
-      // uninterrupted but the audio source changed, which matters if they're
-      // about to look back at the transcript and wonder why the second half
-      // sounds different.
-      if (!composed) return;
-      composed.platform.notifications.show(
+      if (!shell) return;
+      shell.platform.notifications.show(
         {
           title: 'Microphone changed',
           body: "Your input device changed mid-recording. We've switched to the new default and recording continues.",
@@ -1269,58 +1364,44 @@ app.whenReady().then(() => {
     }
   });
 
-  composed = compose({
-    audioLink,
-    platform,
-    appVersion: app.getVersion(),
+  // 2. Build the shell.
+  shell = buildShell({ audioLink, platform, appVersion: app.getVersion() });
+  shell.platform.deviceMonitor.start();
+
+  // 3. IPC bridge.
+  bridge = new IpcBridgeMain(ipcMain, shell.logger);
+  wireIpc(bridge);
+
+  // 4. Initialize auth + subscribe to state changes.
+  await shell.authProvider.initialize();
+  shell.authProvider.onAuthChange(async () => {
+    const userId = shell!.authProvider.getState().userId;
+    try {
+      await swapComposedTo(userId);
+    } catch (err) {
+      shell!.logger.error('swapComposedTo failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    broadcastAuthState();
   });
 
-  // composition.ts calls meetingDetection.start() inline when it constructs
-  // the service — capture the timestamp so the Settings diagnostic panel
-  // can show "Service started: HH:MM" vs. "never."
-  if (composed.meetingDetection) {
-    micMonitorStatus.serviceStarted = true;
-    micMonitorStatus.serviceStartedAt = Date.now();
-    composed.logger.info('meeting_detection_service_started');
-  } else {
-    composed.logger.warn('meeting_detection_service_unavailable', {
-      reason: micMonitorStatus.monitorLoadError ?? 'platform_micActivity_undefined',
-    });
+  // 5. Seed onboardingComplete from globalDb.
+  onboardingComplete = shell.globalDb.getOnboardingCompletedAt() !== null;
+
+  // 6. If already authenticated (rehydrated from globalDb), compose now.
+  const initialUserId = shell.authProvider.getState().userId;
+  if (initialUserId !== null) {
+    try {
+      await swapComposedTo(initialUserId);
+    } catch (err) {
+      shell.logger.error('initial composeForUser failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
-  bridge = new IpcBridgeMain(ipcMain, composed.logger);
-
-  // Construct BEFORE wireBehaviors — it hooks into the upload queue and the
-  // SESSION_RETRY_FAILED handler immediately uses it.
-  transcriptionUx = new TranscriptionUx({
-    store: composed.jobStore,
-    notifications: composed.platform.notifications,
-    broadcastToHud: (state) => {
-      // The "ui state" is consumed by two surfaces: the HUD (visual) and the
-      // main window's Sessions list (auto-refresh on transitions). Fan out to
-      // both. Without main-window delivery the row's Retry button wouldn't
-      // reappear after a failed retry until the user re-navigated tabs.
-      if (!bridge) return;
-      const targets: WebContents[] = [];
-      if (hud) targets.push(hud.webContents());
-      for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
-      for (const wc of targets) {
-        try {
-          bridge.broadcast(wc, PUSH.TRANSCRIPTION_UI_STATE, state);
-        } catch {
-          /* renderer gone */
-        }
-      }
-    },
-    openSessionsTab,
-  });
-
-  wireIpc(bridge, composed);
-  wireBehaviors(composed);
-
-  // Seed the onboarding flag from disk before constructing the HUD so it
-  // stays hidden when the user is still in the wizard.
-  onboardingComplete = composed.settings.load().settings.onboardingCompletedAt !== null;
+  // 7. Create the HUD + main window + tray. HUD honors `onboardingComplete`.
   hud = new FloatingHudWindow(
     PRELOAD_PATH,
     HUD_HTML,
@@ -1328,34 +1409,13 @@ app.whenReady().then(() => {
     onboardingComplete,
   );
   mainWindow = createMainWindow();
-
-  // Menu-bar tray with Home + Quit. Created after openHome is wired (it's
-  // a top-level function in this file, hoisted, so order doesn't matter
-  // for the reference itself). Tray construction is no-op on platforms
-  // where it isn't supported.
-  tray = new TrayManager({ onOpenHome: () => openHome(), logger: composed.logger });
+  tray = new TrayManager({ onOpenHome: () => openHome(), logger: shell.logger });
   tray.init();
 
-  // We intentionally don't seed the HUD's failed state from past DB failures.
-  // The user has already seen those (or has them visible in the Sessions tab);
-  // surfacing them on every launch would be a re-notification of stale state.
-
-  // Track the previous snapshot so we can detect the recording → idle
-  // transition. We need the *previous* sessionId because `snap.sessionId`
-  // becomes null at the moment state hits 'idle'.
-  // Capture elapsedMs from the LAST snap that still had an active session —
-  // by the time `idle` fires, the orchestrator has already cleared `active`
-  // so its snap reports `elapsedMs: 0`. TranscriptionUx uses this to decide
-  // whether a stop was a real recording or a phantom (user pressed the
-  // hotkey just long enough to trigger hold-start, then released).
-  let prevSnap: { sessionId: string | null; elapsedMs: number } | null = null;
-  composed.orchestrator.on('state_changed', (snap) => {
-    if (bridge && composed) broadcastRecordingState(bridge, composed);
-    if (prevSnap?.sessionId && snap.sessionId === null && transcriptionUx) {
-      transcriptionUx.onRecordingStopped(prevSnap.sessionId, prevSnap.elapsedMs);
-    }
-    prevSnap = { sessionId: snap.sessionId, elapsedMs: snap.elapsedMs };
-  });
+  // 8. Broadcast initial auth state once the renderer can subscribe.
+  if (mainWindow) {
+    mainWindow.webContents.once('did-finish-load', () => broadcastAuthState());
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -1363,20 +1423,29 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', async (event) => {
-  if (!composed) return;
+  if (!shell) return;
   event.preventDefault();
   tray?.destroy();
   hud?.destroy();
+  if (composedBindings) {
+    detachComposedBindings(composedBindings);
+    composedBindings = null;
+  }
+  if (composed) {
+    try {
+      await composed.shutdown();
+    } catch {
+      /* best-effort */
+    }
+    composed = null;
+  }
+  await shell.shutdown();
+  shell = null;
   audioProcessHandle?.kill();
-  await composed.shutdown();
-  composed = null;
   app.exit(0);
 });
 
 app.on('activate', () => {
-  // The HUD is a BrowserWindow too, so `getAllWindows().length === 0` is
-  // never true while the app is running. Track the main window explicitly
-  // and recreate / reveal as appropriate when the user dock-clicks.
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
     return;

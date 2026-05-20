@@ -36,6 +36,13 @@ export interface TranscriptionUxDeps {
   readonly broadcastToHud: (state: TranscriptionUiState) => void;
   /** Bring the main window forward and switch to the Sessions tab. */
   readonly openSessionsTab: () => void;
+  /**
+   * Optional: fires the moment every chunk of `sessionId` has reached a
+   * terminal state (completed / failed_permanent). main.ts uses this to
+   * kick off the per-meeting summary call — by this point the backend
+   * already has every successful transcript chunk keyed by sessionId.
+   */
+  readonly onSessionProcessed?: (sessionId: string) => void;
 }
 
 const RETRYABLE_CLASSES = new Set([
@@ -289,6 +296,15 @@ export class TranscriptionUx {
       if (timer) {
         clearTimeout(timer);
         this.processingTimers.delete(sessionId);
+      }
+      // Notify the outer wiring (e.g. summary auto-trigger). Wrapped so a
+      // throwing callback can't poison TranscriptionUx's invariants.
+      if (this.deps.onSessionProcessed) {
+        try {
+          this.deps.onSessionProcessed(sessionId);
+        } catch {
+          /* listener bug — swallow */
+        }
       }
     }
   }

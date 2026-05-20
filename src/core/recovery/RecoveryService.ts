@@ -48,6 +48,25 @@ export interface RecoveryReport {
   orphanCompletedFilesDeleted: number;
   rowsMarkedFileLost: number;
   retentionFilesDeleted: number;
+  /**
+   * Sessions whose summary call was in flight (`summary_status='pending'`)
+   * when the app last quit/crashed. Flipped to `'failed'` so the UI shows
+   * "Generate summary" (manual retry). The backend dedupes by meeting_id,
+   * so a re-fire is harmless even if it had already completed server-side.
+   */
+  staleSummaryPending: number;
+  /**
+   * Sessions still in `status='active'` at startup — orphaned recordings
+   * from a prior process that crashed / was force-quit mid-record.
+   * Force-ended with `end_reason='crash_recovered'`.
+   */
+  crashRecoveredActive: number;
+  /**
+   * Sessions stuck in `status='paused_by_device_loss'` at startup. The
+   * orchestrator's `pendingResume` is in-memory only, so these can't be
+   * resumed across restarts. Force-ended with `device_lost_unresumed`.
+   */
+  unresumedDeviceLoss: number;
 }
 
 export class RecoveryService {
@@ -70,7 +89,18 @@ export class RecoveryService {
       orphanCompletedFilesDeleted: 0,
       rowsMarkedFileLost: 0,
       retentionFilesDeleted: 0,
+      staleSummaryPending: 0,
+      crashRecoveredActive: 0,
+      unresumedDeviceLoss: 0,
     };
+
+    // 0. Crash recovery — runs FIRST so subsequent sweeps see consistent
+    //    session state. Sessions stuck in 'active' or 'paused_by_device_loss'
+    //    at startup are orphans from a prior process that crashed / was
+    //    force-quit. Both are force-ended with a distinct end_reason so they
+    //    stop showing the "live" / "paused (mic disconnected)" badge.
+    report.crashRecoveredActive = this.store.autoEndCrashRecoveredActive();
+    report.unresumedDeviceLoss = this.store.autoEndUnresumedDeviceLoss();
 
     // 1. Sleep timeout — sessions that were paused by sleep too long ago auto-end.
     report.staleSleepSessions = this.store.autoEndStaleSleepPaused(
@@ -101,7 +131,11 @@ export class RecoveryService {
       }
     }
 
-    // 5. Retention sweep: failed_permanent files aged past the horizon.
+    // 5. Stale summary 'pending' → 'failed' so the UI shows "Generate summary".
+    //    Backend dedupes by meeting_id, so re-firing on user click is safe.
+    report.staleSummaryPending = this.store.recoverStaleSummaryPending();
+
+    // 6. Retention sweep: failed_permanent files aged past the horizon.
     const due = this.store.findFailedPermanentDueForRetention(this.options.retentionMs);
     const now = this.clock.now();
     for (const c of due) {

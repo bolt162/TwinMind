@@ -5,6 +5,7 @@ import type { TranscribeRequest } from '@core/asr/IAsrClient';
 
 const req: TranscribeRequest = {
   audioPath: '/tmp/nope.wav',
+  sessionId: 's1',
   mode: 'meeting',
   source: 'mixed',
   startOffsetMs: 0,

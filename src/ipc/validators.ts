@@ -109,6 +109,22 @@ const recordingListInputDevicesOutput = z.object({
   devices: z.array(inputDeviceInfo).max(64),
 });
 
+const summaryStatus = z.enum(['pending', 'completed', 'failed']);
+
+const summaryStateChanged = z.object({
+  sessionId: z.string().min(1).max(64),
+  status: summaryStatus,
+  summaryId: z.string().min(1).max(128).optional(),
+});
+
+const sessionRetrySummaryInput = z.object({
+  sessionId: z.string().min(1).max(64),
+});
+
+const sessionOpenSummaryInput = z.object({
+  sessionId: z.string().min(1).max(64),
+});
+
 const micDeviceLost = z.object({
   sessionId: z.string().min(1).max(64),
   mode: z.enum(['dictation', 'meeting']),
@@ -120,6 +136,57 @@ const micDeviceLost = z.object({
 const recordingResumeFromDeviceLossInput = z.object({
   sessionId: z.string().min(1).max(64),
   deviceId: z.string().max(256).nullable(),
+});
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
+
+const authUserView = z.object({
+  // userIds from Firebase + transformed_sub can be longer than session ids;
+  // cap at 256 to defend against pathological values without blocking the
+  // realistic 30-50 char range.
+  id: z.string().min(1).max(256),
+  email: z.string().min(3).max(320),
+  name: z.string().max(256).nullable(),
+  // URL bound is generous; Google profile photo URLs include query params.
+  photoUrl: z.string().max(2048).nullable(),
+});
+
+const authStateChanged = z.object({
+  isAuthenticated: z.boolean(),
+  user: authUserView.nullable(),
+  // Names like FIREBASE_WEB_API_KEY — small bounded set.
+  configMissing: z.array(z.string().min(1).max(64)).max(32).nullable(),
+});
+
+const authSignInOutput = z.object({
+  ok: z.boolean(),
+  error: z.enum(['cancelled', 'config_missing', 'network', 'unknown']).optional(),
+  // Never includes tokens — cap matches the 4 KB secret cap elsewhere.
+  message: z.string().max(4096).optional(),
+});
+
+const authListUsersOutput = z.object({
+  users: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(256),
+        email: z.string().min(3).max(320),
+        name: z.string().max(256).nullable(),
+        photoUrl: z.string().max(2048).nullable(),
+        lastSignedInAt: z.number().int().nonnegative(),
+        hasRefreshToken: z.boolean(),
+      }),
+    )
+    .max(64),
+});
+
+const storageImportLegacyOutput = z.object({
+  imported: z.boolean(),
+  sessionsImported: z.number().int().nonnegative(),
+});
+
+const wizardGetStatusOutput = z.object({
+  onboardingCompletedAt: z.number().int().nonnegative().nullable(),
 });
 
 /** Map of push channel → payload schema. Used by `bridge.main.broadcast()`. */
@@ -136,6 +203,8 @@ export const PushSchemas = {
   [PUSH.HOTKEY_CHANGED]: hotkeyChanged,
   [PUSH.HOTKEY_CAPTURE_KEY]: hotkeyCaptureKey,
   [PUSH.MIC_DEVICE_LOST]: micDeviceLost,
+  [PUSH.AUTH_STATE_CHANGED]: authStateChanged,
+  [PUSH.SUMMARY_STATE_CHANGED]: summaryStateChanged,
 } as const;
 
 // ─── REQUEST schemas (input + output per channel) ────────────────────────────
@@ -158,15 +227,6 @@ const settingsPayload = z
   // when it parses the body. Schema versioning is the gate.
   .passthrough();
 
-const secretName = z.enum(['groq_api_key']);
-const settingsSetSecretInput = z.object({
-  name: secretName,
-  // Keep an upper bound to defend against the renderer shipping huge blobs.
-  value: z.string().max(4096),
-});
-const settingsHasSecretInput = z.object({ name: secretName });
-const settingsHasSecretOutput = z.object({ present: z.boolean() });
-
 const sessionListItem = z.object({
   id: z.string().min(1).max(64),
   mode: z.enum(['dictation', 'meeting']),
@@ -179,6 +239,8 @@ const sessionListItem = z.object({
    *  if the session has no chunks yet. Used by the UI as the displayed
    *  recording duration so device-loss pause gaps don't inflate it. */
   audioDurationMs: z.number().int().nonnegative().nullable(),
+  summaryStatus: summaryStatus.nullable(),
+  summaryId: z.string().max(128).nullable(),
 });
 
 const sessionListInput = z.object({
@@ -282,8 +344,6 @@ export const RequestSchemas = {
   [REQUEST.PERMISSIONS_OPEN_SYSTEM_SETTINGS]: { input: openSystemSettingsInput, output: empty },
   [REQUEST.SETTINGS_GET]: { input: empty, output: settingsPayload },
   [REQUEST.SETTINGS_SET]: { input: settingsPayload, output: empty },
-  [REQUEST.SETTINGS_SET_SECRET]: { input: settingsSetSecretInput, output: empty },
-  [REQUEST.SETTINGS_HAS_SECRET]: { input: settingsHasSecretInput, output: settingsHasSecretOutput },
   [REQUEST.SESSION_LIST]: { input: sessionListInput, output: sessionListOutput },
   [REQUEST.SESSION_GET]: { input: sessionGetInput, output: sessionGetOutput },
   [REQUEST.SESSION_DELETE]: { input: sessionDeleteInput, output: empty },
@@ -312,6 +372,16 @@ export const RequestSchemas = {
   },
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: hudSetMouseIgnoreInput, output: empty },
   [REQUEST.REC_RESUME_FROM_DEVICE_LOSS]: { input: recordingResumeFromDeviceLossInput, output: empty },
+  [REQUEST.AUTH_GET_STATE]: { input: empty, output: authStateChanged },
+  [REQUEST.AUTH_SIGN_IN]: { input: empty, output: authSignInOutput },
+  [REQUEST.AUTH_SIGN_OUT]: { input: empty, output: empty },
+  [REQUEST.AUTH_LIST_USERS]: { input: empty, output: authListUsersOutput },
+  [REQUEST.AUTH_CANCEL_SIGN_IN]: { input: empty, output: empty },
+  [REQUEST.STORAGE_IMPORT_LEGACY]: { input: empty, output: storageImportLegacyOutput },
+  [REQUEST.WIZARD_GET_STATUS]: { input: empty, output: wizardGetStatusOutput },
+  [REQUEST.WIZARD_COMPLETE]: { input: empty, output: empty },
+  [REQUEST.SESSION_RETRY_SUMMARY]: { input: sessionRetrySummaryInput, output: empty },
+  [REQUEST.SESSION_OPEN_SUMMARY]: { input: sessionOpenSummaryInput, output: empty },
 } as const;
 
 export type RequestChannelName = keyof typeof RequestSchemas;

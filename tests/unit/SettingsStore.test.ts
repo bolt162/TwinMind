@@ -32,10 +32,26 @@ describe('SettingsStore', () => {
   });
 
   it('round-trips through save → load', () => {
-    const next = { ...DEFAULT_SETTINGS, onboardingCompletedAt: 12345 };
+    const next: typeof DEFAULT_SETTINGS = {
+      ...DEFAULT_SETTINGS,
+      privacy: { ...DEFAULT_SETTINGS.privacy, autoDeleteOlderThanDays: 14 },
+    };
     store.save(next);
     const r = store.load();
-    expect(r.settings.onboardingCompletedAt).toBe(12345);
+    expect(r.settings.privacy.autoDeleteOlderThanDays).toBe(14);
+  });
+
+  it('migrates legacy advanced.asrProvider="groq" to "twinmind"', () => {
+    fs.writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({
+        _version: SETTINGS_SCHEMA_VERSION,
+        advanced: { asrProvider: 'groq', logLevel: 'info', vadSilenceThresholdDbfs: -50 },
+      }),
+      'utf8',
+    );
+    const r = store.load();
+    expect(r.settings.advanced.asrProvider).toBe('twinmind');
   });
 
   it('atomic write: never leaves a half-written file (no .tmp afterwards)', () => {

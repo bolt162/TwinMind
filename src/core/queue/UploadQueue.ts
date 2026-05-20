@@ -159,6 +159,7 @@ export class UploadQueue {
       try {
         segment = await this.asr.transcribe({
           audioPath: chunk.file_path,
+          sessionId: chunk.session_id,
           // Source unambiguously implies mode: `mic` = dictation; `mixed` = meeting.
           mode: chunk.source === 'mic' ? 'dictation' : 'meeting',
           source: chunk.source,

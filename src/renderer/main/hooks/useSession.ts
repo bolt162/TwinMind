@@ -24,6 +24,10 @@ export interface SessionDetailData {
   endedAt: number | null;
   title: string | null;
   audioDurationMs: number | null;
+  /** Per-meeting summary lifecycle; null for dictation / not attempted. */
+  summaryStatus: 'pending' | 'completed' | 'failed' | null;
+  /** Backend-assigned summary id once `summaryStatus === 'completed'`. */
+  summaryId: string | null;
   transcripts: SessionTranscriptItem[];
 }
 
@@ -55,9 +59,15 @@ export function useSession(sessionId: string) {
     const unsubSeg = window.electronAPI.on.transcriptSegmentAppended((e) => {
       if (e.sessionId === sessionId) void reload();
     });
+    // Refresh on summary lifecycle transitions so the "View Summary" / "Generate
+    // summary" button updates the moment the backend responds.
+    const unsubSummary = window.electronAPI.on.summaryStateChanged((e) => {
+      if (e.sessionId === sessionId) void reload();
+    });
     return () => {
       unsubState();
       unsubSeg();
+      unsubSummary();
     };
   }, [reload, sessionId]);
 

@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, Loader2, Mic, Radio } from 'lucide-react';
+import { ChevronLeft, ExternalLink, Loader2, Mic, Radio, Sparkles } from 'lucide-react';
 import { useSession } from '../hooks/useSession';
 
 interface Props {
@@ -64,22 +64,105 @@ function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSessio
         </div>
         <div className="min-w-0 flex-1">
           <EditableTitle sessionId={data.id} initial={data.title} mode={data.mode} />
-          <div className="text-xs text-zinc-500">
-            {started.toLocaleString()} · {data.mode}
-            {durationSec !== null && ` · ${formatDuration(durationSec)}`}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+            <span>
+              {started.toLocaleString()} · {data.mode}
+              {durationSec !== null && ` · ${formatDuration(durationSec)}`}
+            </span>
             {data.status === 'active' && (
-              <span className="ml-2 rounded-full bg-red-600/30 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
+              <span className="rounded-full bg-red-600/30 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
                 live
               </span>
             )}
-            {data.status === 'paused_by_sleep' && ' · paused by sleep'}
-            {data.status === 'paused_by_device_loss' && ' · paused (mic disconnected)'}
+            {data.status === 'paused_by_sleep' && <span>· paused by sleep</span>}
+            {data.status === 'paused_by_device_loss' && <span>· paused (mic disconnected)</span>}
+            {data.mode === 'meeting' && data.status === 'ended' && (
+              <SummaryButton sessionId={data.id} status={data.summaryStatus} />
+            )}
           </div>
         </div>
       </div>
     </div>
   );
 }
+
+/**
+ * Per-meeting summary affordance shown next to the date/time row.
+ *
+ *   completed → "View Summary" — opens `${TWINMIND_APP_URL}/m/${sessionId}`
+ *               externally via the host-validated MISC_OPEN_EXTERNAL_URL IPC.
+ *   pending   → "Generating summary…" (disabled). The summary call is in
+ *               flight; useSession will reload on the next push.
+ *   failed    → "Generate summary" — clicking re-fires the request via
+ *               SESSION_RETRY_SUMMARY. Same path the auto-trigger uses.
+ *   null      → "Generate summary" — auto-trigger hasn't fired yet (e.g.
+ *               chunks still landing). Clicking fires it manually.
+ *
+ * For a dictation session this component never mounts (the caller gates it).
+ */
+function SummaryButton({
+  sessionId,
+  status,
+}: {
+  sessionId: string;
+  status: 'pending' | 'completed' | 'failed' | null;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleClick = async () => {
+    if (busy) return;
+    setError(null);
+    if (status === 'completed') {
+      // Main builds the deep link from the configured TWINMIND_APP_URL +
+      // session id, then opens it externally. The renderer never crafts a
+      // URL the user could be tricked into following.
+      try {
+        await window.electronAPI.sessions.openSummary({ sessionId });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
+    setBusy(true);
+    try {
+      await window.electronAPI.sessions.retrySummary({ sessionId });
+      // useSession refreshes on `summary_state_changed`; no manual reload.
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const isCompleted = status === 'completed';
+  const isPending = status === 'pending';
+  const label = isPending
+    ? 'Generating summary…'
+    : isCompleted
+      ? 'View Summary'
+      : 'Generate summary';
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={isPending || busy}
+        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition ${
+          isCompleted
+            ? 'border-emerald-800/60 bg-emerald-950/30 text-emerald-300 hover:border-emerald-700 hover:bg-emerald-900/40'
+            : 'border-zinc-700 bg-zinc-800/50 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50'
+        }`}
+      >
+        {isCompleted ? <ExternalLink className="h-3 w-3" /> : <Sparkles className="h-3 w-3" />}
+        <span>{label}</span>
+      </button>
+      {error && <span className="text-[11px] text-red-400">{error}</span>}
+    </div>
+  );
+}
+
 
 /**
  * Click-to-edit title. Optimistic: the on-screen value flips immediately on

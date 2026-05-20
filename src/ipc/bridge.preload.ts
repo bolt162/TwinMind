@@ -69,12 +69,6 @@ const electronAPI = {
     get: () => invoke(REQUEST.SETTINGS_GET, {}),
     set: (settings: RequestPayloads[typeof REQUEST.SETTINGS_SET]['input']) =>
       invoke(REQUEST.SETTINGS_SET, settings),
-    setSecret: (
-      input: RequestPayloads[typeof REQUEST.SETTINGS_SET_SECRET]['input'],
-    ) => invoke(REQUEST.SETTINGS_SET_SECRET, input),
-    hasSecret: (
-      input: RequestPayloads[typeof REQUEST.SETTINGS_HAS_SECRET]['input'],
-    ) => invoke(REQUEST.SETTINGS_HAS_SECRET, input),
   },
   sessions: {
     list: (input: { limit?: number } = {}) => invoke(REQUEST.SESSION_LIST, input),
@@ -84,6 +78,10 @@ const electronAPI = {
       invoke(REQUEST.SESSION_RETRY_FAILED, input),
     updateTitle: (input: { sessionId: string; title: string | null }) =>
       invoke(REQUEST.SESSION_UPDATE_TITLE, input),
+    retrySummary: (input: { sessionId: string }) =>
+      invoke(REQUEST.SESSION_RETRY_SUMMARY, input),
+    openSummary: (input: { sessionId: string }) =>
+      invoke(REQUEST.SESSION_OPEN_SUMMARY, input),
   },
   dictations: {
     list: (input: { limit?: number } = {}) => invoke(REQUEST.DICTATION_LIST, input),
@@ -116,6 +114,20 @@ const electronAPI = {
     resumeFromDeviceLoss: (input: RequestPayloads[typeof REQUEST.REC_RESUME_FROM_DEVICE_LOSS]['input']) =>
       invoke(REQUEST.REC_RESUME_FROM_DEVICE_LOSS, input),
   },
+  auth: {
+    getState: () => invoke(REQUEST.AUTH_GET_STATE, {}),
+    signIn: () => invoke(REQUEST.AUTH_SIGN_IN, {}),
+    signOut: () => invoke(REQUEST.AUTH_SIGN_OUT, {}),
+    listUsers: () => invoke(REQUEST.AUTH_LIST_USERS, {}),
+    cancelSignIn: () => invoke(REQUEST.AUTH_CANCEL_SIGN_IN, {}),
+  },
+  storage: {
+    importLegacy: () => invoke(REQUEST.STORAGE_IMPORT_LEGACY, {}),
+  },
+  wizard: {
+    getStatus: () => invoke(REQUEST.WIZARD_GET_STATUS, {}),
+    complete: () => invoke(REQUEST.WIZARD_COMPLETE, {}),
+  },
   on: {
     recordingStateChanged: (cb: (e: PushPayloads[typeof PUSH.RECORDING_STATE]) => void) =>
       subscribe(PUSH.RECORDING_STATE, cb),
@@ -144,6 +156,10 @@ const electronAPI = {
       subscribe(PUSH.HOTKEY_CAPTURE_KEY, cb),
     micDeviceLost: (cb: (e: PushPayloads[typeof PUSH.MIC_DEVICE_LOST]) => void) =>
       subscribe(PUSH.MIC_DEVICE_LOST, cb),
+    authStateChanged: (cb: (e: PushPayloads[typeof PUSH.AUTH_STATE_CHANGED]) => void) =>
+      subscribe(PUSH.AUTH_STATE_CHANGED, cb),
+    summaryStateChanged: (cb: (e: PushPayloads[typeof PUSH.SUMMARY_STATE_CHANGED]) => void) =>
+      subscribe(PUSH.SUMMARY_STATE_CHANGED, cb),
   },
 } as const;
 

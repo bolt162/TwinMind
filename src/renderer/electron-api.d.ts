@@ -32,12 +32,6 @@ declare global {
       readonly settings: {
         get(): Promise<RequestPayloads['settings.get']['output']>;
         set(s: RequestPayloads['settings.set']['input']): Promise<Record<string, never>>;
-        setSecret(
-          input: RequestPayloads['settings.setSecret']['input'],
-        ): Promise<Record<string, never>>;
-        hasSecret(
-          input: RequestPayloads['settings.hasSecret']['input'],
-        ): Promise<RequestPayloads['settings.hasSecret']['output']>;
       };
       readonly sessions: {
         list(input?: { limit?: number }): Promise<RequestPayloads['session.list']['output']>;
@@ -50,6 +44,8 @@ declare global {
           sessionId: string;
           title: string | null;
         }): Promise<Record<string, never>>;
+        retrySummary(input: { sessionId: string }): Promise<Record<string, never>>;
+        openSummary(input: { sessionId: string }): Promise<Record<string, never>>;
       };
       readonly dictations: {
         list(input?: { limit?: number }): Promise<RequestPayloads['dictation.list']['output']>;
@@ -83,6 +79,23 @@ declare global {
       };
       readonly recording_devices: {
         list(): Promise<RequestPayloads['recording.listInputDevices']['output']>;
+        resumeFromDeviceLoss(
+          input: RequestPayloads['recording.resumeFromDeviceLoss']['input'],
+        ): Promise<Record<string, never>>;
+      };
+      readonly auth: {
+        getState(): Promise<RequestPayloads['auth.getState']['output']>;
+        signIn(): Promise<RequestPayloads['auth.signIn']['output']>;
+        signOut(): Promise<Record<string, never>>;
+        listUsers(): Promise<RequestPayloads['auth.listUsers']['output']>;
+        cancelSignIn(): Promise<Record<string, never>>;
+      };
+      readonly storage: {
+        importLegacy(): Promise<RequestPayloads['storage.importLegacy']['output']>;
+      };
+      readonly wizard: {
+        getStatus(): Promise<RequestPayloads['wizard.getStatus']['output']>;
+        complete(): Promise<Record<string, never>>;
       };
       readonly on: {
         recordingStateChanged(
@@ -117,6 +130,15 @@ declare global {
         ): () => void;
         hotkeyCaptureKey(
           cb: (e: PushPayloads['hotkey_capture_key']) => void,
+        ): () => void;
+        authStateChanged(
+          cb: (e: PushPayloads['auth_state_changed']) => void,
+        ): () => void;
+        micDeviceLost(
+          cb: (e: PushPayloads['mic_device_lost']) => void,
+        ): () => void;
+        summaryStateChanged(
+          cb: (e: PushPayloads['summary_state_changed']) => void,
         ): () => void;
       };
     };

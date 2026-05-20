@@ -16,10 +16,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, RotateCw, History, X, Home } from 'lucide-react';
+import { Mic, MicOff, Radio, RotateCw, History, X, Home } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 type RecordingState = 'idle' | 'starting' | 'recording' | 'stopping';
+type RecordingMode = 'idle' | 'dictation' | 'meeting';
 type TranscriptionUiState =
   | { kind: 'idle' }
   | { kind: 'processing' }
@@ -58,6 +59,10 @@ interface DeviceLostState {
 
 export function HudApp() {
   const [recording, setRecording] = useState<RecordingState>('idle');
+  // Mode is read from the same RECORDING_STATE_CHANGED push. We need it to
+  // route clicks: the main pill drives dictation, the meeting button drives
+  // meeting mode, and each one is disabled while the OTHER mode is recording.
+  const [mode, setMode] = useState<RecordingMode>('idle');
   const [txState, setTxState] = useState<TranscriptionUiState>({ kind: 'idle' });
   const [hovered, setHovered] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -131,6 +136,10 @@ export function HudApp() {
   // ─── Subscriptions ──────────────────────────────────────────────────────
   useEffect(() => {
     const unsubRec = window.electronAPI.on.recordingStateChanged((e) => {
+      // Mode is part of the push payload; the HUD uses it to decide which
+      // affordance owns the recording state (main pill for dictation, the
+      // new "Take notes" button for meetings).
+      setMode(e.mode);
       if (e.state === 'starting' || e.state === 'recording' || e.state === 'stopping') {
         setRecording(e.state);
         if (e.sessionId) sessionIdRef.current = e.sessionId;
@@ -150,19 +159,35 @@ export function HudApp() {
       });
     });
     // Initial read of the configured primary hotkey + live updates via the
-    // HOTKEY_CHANGED push channel. main.ts broadcasts on every successful
-    // SETTINGS_SET so the chip reflects the new binding the moment the user
-    // captures it — no app restart, no HUD remount.
+    // HOTKEY_CHANGED push channel. Settings live in the per-user DB, so we
+    // can only read them once a user is signed in — fetching pre-auth fires
+    // SETTINGS_GET against a null composed app and main throws not_signed_in.
+    // We gate on AUTH_STATE_CHANGED (with an initial getState()) so the
+    // fetch happens after sign-in lands, and re-fires on user switch.
     const applyHotkey = (primary: Hotkey | null) => {
       setHotkeyLabel(primary ? formatHotkey(primary) : 'Fn');
     };
-    void window.electronAPI.settings
-      .get()
-      .then((s) => {
-        const primary = (s as { hotkeys?: { primary?: Hotkey | null } }).hotkeys?.primary;
-        applyHotkey(primary ?? null);
-      })
-      .catch(() => {});
+    const refetchHotkey = () => {
+      void window.electronAPI.settings
+        .get()
+        .then((s) => {
+          const primary = (s as { hotkeys?: { primary?: Hotkey | null } }).hotkeys?.primary;
+          applyHotkey(primary ?? null);
+        })
+        .catch(() => {
+          /* signed out / transient — fall back to the default 'Fn' label */
+        });
+    };
+    void window.electronAPI.auth.getState().then((s) => {
+      if (s.isAuthenticated) refetchHotkey();
+    });
+    const unsubAuth = window.electronAPI.on.authStateChanged((s) => {
+      if (s.isAuthenticated) {
+        refetchHotkey();
+      } else {
+        applyHotkey(null);
+      }
+    });
     const unsubHotkey = window.electronAPI.on.hotkeyChanged((e) => {
       applyHotkey((e.primary as Hotkey | null) ?? null);
     });
@@ -174,6 +199,7 @@ export function HudApp() {
       unsubTx();
       unsubHotkey();
       unsubLost();
+      unsubAuth();
     };
   }, []);
 
@@ -315,24 +341,22 @@ export function HudApp() {
     document.addEventListener('mouseup', onUp);
   };
 
+  // The main pill drives DICTATION only. If a meeting is recording, the
+  // pill is non-interactive — the user must stop the meeting first (via
+  // the "Take notes" button next to it).
+  const pillDisabled = isRecording && mode === 'meeting';
+
   const onPillClick = () => {
     if (dragMoved.current) {
       dragMoved.current = false;
       return;
     }
     if (isBusy) return;
+    if (pillDisabled) return;
     if (recording === 'idle' && txState.kind === 'idle') {
-      void window.electronAPI.recording
-        .startMeeting()
-        .then((r) => {
-          sessionIdRef.current = r.sessionId;
-        })
-        .catch(() => {});
-    } else if (isRecording) {
-      const sid = sessionIdRef.current;
-      if (sid) {
-        void window.electronAPI.recording.stopMeeting({ sessionId: sid }).catch(() => {});
-      }
+      void window.electronAPI.recording.startDictation().catch(() => {});
+    } else if (isRecording && mode === 'dictation') {
+      void window.electronAPI.recording.stopDictation().catch(() => {});
     }
     // For 'processing' and 'failed' states, clicks on the pill itself are no-ops
     // — the retry/history buttons inside the pill are what the user touches.
@@ -363,8 +387,12 @@ export function HudApp() {
           'border border-white/40 bg-black/55 backdrop-blur-md',
           // shadow intentionally removed — the soft halo read as a faint
           // "box" around the buttons on transparent backdrops.
-          'transition-[width,height,padding] duration-150 ease-out',
+          'transition-[width,height,padding,opacity] duration-150 ease-out',
           'overflow-hidden text-white select-none cursor-grab active:cursor-grabbing',
+          // Faded + non-cursor when a meeting is recording. The button stays
+          // hit-detectable (so the HUD's hover-reveal still works), but the
+          // click handler short-circuits via `pillDisabled` above.
+          pillDisabled ? 'opacity-40 cursor-not-allowed' : '',
           visual === 'failed' || visual === 'disconnected'
             ? 'px-6 py-4 items-stretch'
             : expanded
@@ -437,11 +465,138 @@ export function HudApp() {
           />
         )}
       </button>
+      <MeetingButton
+        // Stay visible while a meeting is recording so the user can stop it
+        // without having to hover to reveal the button. Otherwise behaves
+        // like HomeButton — opacity tied to group hover state.
+        visible={hovered || (isRecording && mode === 'meeting')}
+        // Non-clickable while a dictation is recording. Pointer-events go
+        // through, click handler is unreachable, no tooltip on hover.
+        disabled={isRecording && mode === 'dictation'}
+        recordingMeeting={isRecording && mode === 'meeting'}
+        canStart={recording === 'idle' && txState.kind === 'idle'}
+        onEnter={() => setGroupHovered(true)}
+        onLeave={() => setGroupHovered(false)}
+        onStart={() => {
+          void window.electronAPI.recording
+            .startMeeting()
+            .then((r) => {
+              sessionIdRef.current = r.sessionId;
+            })
+            .catch(() => {});
+        }}
+        onStop={() => {
+          const sid = sessionIdRef.current;
+          if (sid) {
+            void window.electronAPI.recording
+              .stopMeeting({ sessionId: sid })
+              .catch(() => {});
+          }
+        }}
+      />
       <HomeButton
         visible={hovered}
         onEnter={() => setGroupHovered(true)}
         onLeave={() => setGroupHovered(false)}
       />
+    </div>
+  );
+}
+
+/**
+ * "Take notes" — the only entry point for meeting mode. Same visual
+ * footprint as HomeButton (7x7 dark-glass circle). Three states:
+ *
+ *   idle / not recording   →  Radio icon. Click starts a meeting.
+ *   recording (this mode)  →  Red dot. Click stops the meeting.
+ *   disabled (dictating)   →  Faded; pointer-events: none. Click impossible.
+ *
+ * Hovering shows a small "Take notes" tooltip above the button — a hint
+ * that's specifically requested for discoverability since the icon alone
+ * doesn't say "meeting".
+ */
+function MeetingButton({
+  visible,
+  disabled,
+  recordingMeeting,
+  canStart,
+  onEnter,
+  onLeave,
+  onStart,
+  onStop,
+}: {
+  visible: boolean;
+  disabled: boolean;
+  recordingMeeting: boolean;
+  canStart: boolean;
+  onEnter: () => void;
+  onLeave: () => void;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const [tipShown, setTipShown] = useState(false);
+
+  const handleClick = () => {
+    if (disabled) return;
+    if (recordingMeeting) {
+      onStop();
+      return;
+    }
+    if (canStart) onStart();
+  };
+
+  const handleEnter = () => {
+    onEnter();
+    if (!disabled) setTipShown(true);
+  };
+  const handleLeave = () => {
+    onLeave();
+    setTipShown(false);
+  };
+
+  return (
+    <div className="relative">
+      {tipShown && !disabled && !recordingMeeting && (
+        // Centered above the button; small gap (1.5) so the tail of the
+        // tooltip doesn't touch the button border. Dark-glass styling matches
+        // the rest of the HUD chrome.
+        <div
+          className="pointer-events-none absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-white/20 bg-black/80 px-2 py-0.5 text-[10px] font-medium text-white/90 backdrop-blur-md"
+          role="tooltip"
+        >
+          Take notes
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={handleClick}
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        aria-label={
+          disabled
+            ? 'Take notes (unavailable while dictating)'
+            : recordingMeeting
+              ? 'Stop meeting'
+              : 'Take notes'
+        }
+        data-hud-interactive="true"
+        className={[
+          'flex h-7 w-7 shrink-0 items-center justify-center rounded-full',
+          'border border-white/40 bg-black/55 backdrop-blur-md',
+          'transition-opacity duration-150',
+          disabled
+            ? 'pointer-events-none opacity-40 text-white/40'
+            : visible || recordingMeeting
+              ? 'opacity-100 text-white/80 hover:text-white hover:bg-black/70'
+              : 'pointer-events-none opacity-0 text-white/80',
+        ].join(' ')}
+      >
+        {recordingMeeting ? (
+          <span className="h-2 w-2 rounded-full bg-red-500" />
+        ) : (
+          <Radio className="h-3.5 w-3.5" />
+        )}
+      </button>
     </div>
   );
 }

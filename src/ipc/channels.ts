@@ -27,6 +27,8 @@ export const PUSH = {
   HOTKEY_CHANGED: 'hotkey_changed',
   HOTKEY_CAPTURE_KEY: 'hotkey_capture_key',
   MIC_DEVICE_LOST: 'mic_device_lost',
+  AUTH_STATE_CHANGED: 'auth_state_changed',
+  SUMMARY_STATE_CHANGED: 'summary_state_changed',
 } as const;
 export type PushChannel = (typeof PUSH)[keyof typeof PUSH];
 
@@ -43,8 +45,6 @@ export const REQUEST = {
   PERMISSIONS_OPEN_SYSTEM_SETTINGS: 'permissions.openSystemSettings',
   SETTINGS_GET: 'settings.get',
   SETTINGS_SET: 'settings.set',
-  SETTINGS_SET_SECRET: 'settings.setSecret',
-  SETTINGS_HAS_SECRET: 'settings.hasSecret',
   SESSION_LIST: 'session.list',
   SESSION_GET: 'session.get',
   SESSION_DELETE: 'session.delete',
@@ -64,6 +64,16 @@ export const REQUEST = {
   RECORDING_LIST_INPUT_DEVICES: 'recording.listInputDevices',
   HUD_SET_MOUSE_IGNORE: 'hud.setMouseIgnore',
   REC_RESUME_FROM_DEVICE_LOSS: 'recording.resumeFromDeviceLoss',
+  AUTH_GET_STATE: 'auth.getState',
+  AUTH_SIGN_IN: 'auth.signIn',
+  AUTH_SIGN_OUT: 'auth.signOut',
+  AUTH_LIST_USERS: 'auth.listUsers',
+  AUTH_CANCEL_SIGN_IN: 'auth.cancelSignIn',
+  STORAGE_IMPORT_LEGACY: 'storage.importLegacy',
+  WIZARD_GET_STATUS: 'wizard.getStatus',
+  WIZARD_COMPLETE: 'wizard.complete',
+  SESSION_RETRY_SUMMARY: 'session.retrySummary',
+  SESSION_OPEN_SUMMARY: 'session.openSummary',
 } as const;
 export type RequestChannel = (typeof REQUEST)[keyof typeof REQUEST];
 
@@ -200,6 +210,28 @@ export interface MicDeviceLost {
   readonly devices: ReadonlyArray<InputDeviceInfo>;
 }
 
+/**
+ * Renderer-facing view of the auth state. Pushed on every transition so the
+ * UI (SignInScreen / AccountCard / HUD visibility) can react.
+ *
+ * `user` is non-null iff `isAuthenticated`. When false, `configMissing` may
+ * list the env-var names that prevented the auth provider from starting —
+ * the Settings page surfaces this so deployment misconfig isn't invisible.
+ */
+export interface AuthUserView {
+  readonly id: string;
+  readonly email: string;
+  readonly name: string | null;
+  readonly photoUrl: string | null;
+}
+
+export interface AuthStateChanged {
+  readonly isAuthenticated: boolean;
+  readonly user: AuthUserView | null;
+  /** Null when config is fine. Array of missing env-var names when not. */
+  readonly configMissing: ReadonlyArray<string> | null;
+}
+
 // ─── REQUEST input/output types ─────────────────────────────────────────────
 
 export type Empty = Record<string, never>;
@@ -232,25 +264,8 @@ export interface SettingsPayload {
   readonly [key: string]: unknown;
 }
 
-/**
- * Secret-write payload. The renderer never reads secrets back; only writes.
- * Main encrypts the value via DarwinSecureStorage and stores it in JobStore.kv.
- *
- * Supported names — exhaustive on purpose so a typo is a compile error.
- */
-export type SecretName = 'groq_api_key';
-export interface SettingsSetSecretInput {
-  readonly name: SecretName;
-  /** UTF-8 cleartext. Empty string CLEARS the secret. */
-  readonly value: string;
-}
-
-export interface SettingsHasSecretInput {
-  readonly name: SecretName;
-}
-export interface SettingsHasSecretOutput {
-  readonly present: boolean;
-}
+/** Lifecycle of the per-meeting summary call (DB column projection). */
+export type SummaryStatus = 'pending' | 'completed' | 'failed';
 
 export interface SessionListItem {
   readonly id: string;
@@ -268,6 +283,26 @@ export interface SessionListItem {
    * actually-recorded audio. Null if the session has no chunks yet.
    */
   readonly audioDurationMs: number | null;
+  /** Summary state for meeting sessions; null for dictation / not attempted. */
+  readonly summaryStatus: SummaryStatus | null;
+  /** Backend-assigned summary id; null until `summaryStatus === 'completed'`. */
+  readonly summaryId: string | null;
+}
+
+/** Pushed whenever a session's summary state transitions. */
+export interface SummaryStateChanged {
+  readonly sessionId: string;
+  readonly status: SummaryStatus;
+  /** Populated on `'completed'`; absent otherwise. */
+  readonly summaryId?: string;
+}
+
+export interface SessionRetrySummaryInput {
+  readonly sessionId: string;
+}
+
+export interface SessionOpenSummaryInput {
+  readonly sessionId: string;
 }
 
 export interface SessionListInput {
@@ -376,6 +411,59 @@ export interface HudSetMouseIgnoreInput {
   readonly ignore: boolean;
 }
 
+/**
+ * Snapshot of auth state returned by AUTH_GET_STATE. Same shape as the
+ * AUTH_STATE_CHANGED push — the renderer calls this once on mount to seed
+ * before subscribing, then relies on pushes for further updates.
+ */
+export type AuthGetStateOutput = AuthStateChanged;
+
+/**
+ * Result of AUTH_SIGN_IN. On success the renderer also receives an
+ * AUTH_STATE_CHANGED push; this return value is for displaying immediate
+ * feedback (e.g., "the OAuth window closed before consent").
+ */
+export interface AuthSignInOutput {
+  /** True iff the user is now signed in. False on user-cancel or backend error. */
+  readonly ok: boolean;
+  /** Short, user-safe error label when `ok === false`. */
+  readonly error?: 'cancelled' | 'config_missing' | 'network' | 'unknown';
+  /** Human-readable detail; never includes tokens. */
+  readonly message?: string;
+}
+
+/**
+ * One row from the local user directory. NEVER includes the refresh token —
+ * the renderer only needs identity for the welcome screen's "Continue as X"
+ * affordance.
+ */
+export interface AuthUserDirectoryEntry {
+  readonly id: string;
+  readonly email: string;
+  readonly name: string | null;
+  readonly photoUrl: string | null;
+  readonly lastSignedInAt: number;
+  /** True iff a refresh token is still stored for this user (auto-resume possible). */
+  readonly hasRefreshToken: boolean;
+}
+
+export interface AuthListUsersOutput {
+  readonly users: ReadonlyArray<AuthUserDirectoryEntry>;
+}
+
+export interface StorageImportLegacyOutput {
+  /** True iff legacy data was found and moved into the active user. */
+  readonly imported: boolean;
+  /** Number of sessions moved (0 when nothing to import). */
+  readonly sessionsImported: number;
+}
+
+/** Machine-scoped wizard status — read from GlobalDb.wizard. */
+export interface WizardGetStatusOutput {
+  /** Epoch ms when the wizard was first finished on this machine, or null. */
+  readonly onboardingCompletedAt: number | null;
+}
+
 // ─── Channel → payload map (compile-time directory) ─────────────────────────
 
 /** Push events: channel name → broadcast payload type. */
@@ -392,6 +480,8 @@ export interface PushPayloads {
   [PUSH.HOTKEY_CHANGED]: HotkeyChanged;
   [PUSH.HOTKEY_CAPTURE_KEY]: HotkeyCaptureKey;
   [PUSH.MIC_DEVICE_LOST]: MicDeviceLost;
+  [PUSH.AUTH_STATE_CHANGED]: AuthStateChanged;
+  [PUSH.SUMMARY_STATE_CHANGED]: SummaryStateChanged;
 }
 
 /** Request channels: channel name → { input, output } pair. */
@@ -411,8 +501,6 @@ export interface RequestPayloads {
   [REQUEST.PERMISSIONS_OPEN_SYSTEM_SETTINGS]: { input: OpenSystemSettingsInput; output: Empty };
   [REQUEST.SETTINGS_GET]: { input: Empty; output: SettingsPayload };
   [REQUEST.SETTINGS_SET]: { input: SettingsPayload; output: Empty };
-  [REQUEST.SETTINGS_SET_SECRET]: { input: SettingsSetSecretInput; output: Empty };
-  [REQUEST.SETTINGS_HAS_SECRET]: { input: SettingsHasSecretInput; output: SettingsHasSecretOutput };
   [REQUEST.SESSION_LIST]: { input: SessionListInput; output: SessionListOutput };
   [REQUEST.SESSION_GET]: { input: SessionGetInput; output: SessionGetOutput };
   [REQUEST.SESSION_DELETE]: { input: SessionDeleteInput; output: Empty };
@@ -466,4 +554,14 @@ export interface RequestPayloads {
     input: { readonly sessionId: string; readonly deviceId: string | null };
     output: Empty;
   };
+  [REQUEST.AUTH_GET_STATE]: { input: Empty; output: AuthGetStateOutput };
+  [REQUEST.AUTH_SIGN_IN]: { input: Empty; output: AuthSignInOutput };
+  [REQUEST.AUTH_SIGN_OUT]: { input: Empty; output: Empty };
+  [REQUEST.AUTH_LIST_USERS]: { input: Empty; output: AuthListUsersOutput };
+  [REQUEST.AUTH_CANCEL_SIGN_IN]: { input: Empty; output: Empty };
+  [REQUEST.STORAGE_IMPORT_LEGACY]: { input: Empty; output: StorageImportLegacyOutput };
+  [REQUEST.WIZARD_GET_STATUS]: { input: Empty; output: WizardGetStatusOutput };
+  [REQUEST.WIZARD_COMPLETE]: { input: Empty; output: Empty };
+  [REQUEST.SESSION_RETRY_SUMMARY]: { input: SessionRetrySummaryInput; output: Empty };
+  [REQUEST.SESSION_OPEN_SUMMARY]: { input: SessionOpenSummaryInput; output: Empty };
 }

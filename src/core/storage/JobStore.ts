@@ -29,6 +29,8 @@ export type SessionStatus =
   | 'paused_by_device_loss';
 export type ChunkSource = 'mic' | 'mixed';
 
+export type SummaryStatus = 'pending' | 'completed' | 'failed';
+
 export interface SessionRow {
   id: string;
   mode: SessionMode;
@@ -41,6 +43,12 @@ export interface SessionRow {
   created_at: number;
   synced_at: number | null;
   remote_id: string | null;
+  /** Lifecycle of the per-meeting summary call. NULL for non-meeting / not-yet-attempted. */
+  summary_status: SummaryStatus | null;
+  /** Backend-assigned summary id from the response; null when not completed. */
+  summary_id: string | null;
+  summary_requested_at: number | null;
+  summary_completed_at: number | null;
 }
 
 export interface ChunkRow {
@@ -210,6 +218,32 @@ export class JobStore {
    *  shouldn't crash the IPC. */
   updateSessionTitle(id: string, title: string | null): void {
     this.stmts.updateSessionTitle.run({ id, title });
+  }
+
+  /**
+   * Per-meeting summary lifecycle. Each helper is a CAS-style UPDATE — calling
+   * `setSummaryPending` on a dictation row is a silent no-op (the WHERE clause
+   * filters by mode). Reads come back via `getSession(id)` and project the
+   * summary_* columns straight through.
+   */
+  setSummaryPending(id: string, now: number): void {
+    this.stmts.setSummaryPending.run({ id, now });
+  }
+  setSummaryCompleted(id: string, summary_id: string, now: number): void {
+    this.stmts.setSummaryCompleted.run({ id, summary_id, now });
+  }
+  setSummaryFailed(id: string): void {
+    this.stmts.setSummaryFailed.run({ id });
+  }
+
+  /**
+   * Recovery sweep — flips any leftover `summary_status='pending'` row (from
+   * a previous launch that crashed mid-summary) back to 'failed' so the UI
+   * shows the manual "Generate summary" retry button. Returns the number of
+   * rows touched, for telemetry.
+   */
+  recoverStaleSummaryPending(): number {
+    return this.stmts.recoverStaleSummaryPending.run().changes;
   }
 
   /** Most recently-ended (or active) session's mode. Used by main to route the
@@ -405,9 +439,9 @@ export class JobStore {
   }
 
   /**
-   * Delete every row in sessions / chunks / transcripts / mic_activity / kv.
-   * The kv `groq_api_key_enc` row would also be deleted; callers that want to
-   * preserve secrets should snapshot and restore around this call.
+   * Delete every row in sessions / chunks / transcripts / mic_activity / kv
+   * for THIS user's DB. Auth credentials (refresh token) live in
+   * `<userData>/global.db` and are untouched.
    *
    * Wrapped in an immediate transaction so a crash mid-nuke either leaves the
    * DB untouched or wholly empty. FK CASCADE handles chunks/transcripts as a
@@ -447,6 +481,27 @@ export class JobStore {
       threshold: now - ageMs,
     });
     return r.changes;
+  }
+
+  /**
+   * Crash recovery for sessions still marked `active` at startup. The
+   * orchestrator never leaves a session at `active` across process
+   * boundaries; any survivor is an orphaned recording from a prior run
+   * (force-quit, panic, power loss). Returns the row count touched.
+   */
+  autoEndCrashRecoveredActive(): number {
+    return this.stmts.autoEndCrashRecoveredActive.run().changes;
+  }
+
+  /**
+   * Crash recovery for sessions stuck in `paused_by_device_loss`. The
+   * `pendingResume` snapshot lives in the in-process orchestrator only,
+   * so a paused-by-device-loss row at startup is unrecoverable — the
+   * user can't get back to the device picker without the matching
+   * in-memory state. Force-end with `device_lost_unresumed`.
+   */
+  autoEndUnresumedDeviceLoss(): number {
+    return this.stmts.autoEndUnresumedDeviceLoss.run().changes;
   }
 
   // ─── Chunks: inserts and reads ─────────────────────────────────────────────
@@ -758,6 +813,61 @@ export class JobStore {
         UPDATE sessions
         SET status='ended', ended_at=@now, end_reason='device_lost_timeout'
         WHERE status='paused_by_device_loss' AND started_at < @threshold
+      `),
+      // Crash recovery: any session still 'active' at startup is by
+      // definition orphaned — the orchestrator only writes 'active' while
+      // recording in-process, and exits via stop()/pauseFor*() before
+      // shutdown. ended_at is computed as started_at + max(chunks.end_ms)
+      // so the displayed duration reflects audio actually captured before
+      // the crash; falls back to started_at (zero duration) if no chunks
+      // ever closed. No threshold — runs on every recovery pass.
+      autoEndCrashRecoveredActive: this.db.prepare(`
+        UPDATE sessions
+        SET status='ended',
+            end_reason='crash_recovered',
+            ended_at=COALESCE(
+              started_at + (SELECT MAX(end_ms) FROM chunks WHERE session_id = sessions.id),
+              started_at
+            )
+        WHERE status='active'
+      `),
+      // Sibling of the active-sweep for device-loss: pendingResume lives
+      // only in the in-process orchestrator, so a paused_by_device_loss
+      // row at startup is unrecoverable. Force-end with a distinct
+      // end_reason so we can tell it apart from a normal timeout.
+      autoEndUnresumedDeviceLoss: this.db.prepare(`
+        UPDATE sessions
+        SET status='ended',
+            end_reason='device_lost_unresumed',
+            ended_at=COALESCE(
+              started_at + (SELECT MAX(end_ms) FROM chunks WHERE session_id = sessions.id),
+              started_at
+            )
+        WHERE status='paused_by_device_loss'
+      `),
+
+      // ── summary lifecycle ──
+      setSummaryPending: this.db.prepare(`
+        UPDATE sessions
+        SET summary_status='pending', summary_requested_at=@now
+        WHERE id=@id AND mode='meeting'
+      `),
+      setSummaryCompleted: this.db.prepare(`
+        UPDATE sessions
+        SET summary_status='completed', summary_id=@summary_id, summary_completed_at=@now
+        WHERE id=@id
+      `),
+      setSummaryFailed: this.db.prepare(`
+        UPDATE sessions
+        SET summary_status='failed'
+        WHERE id=@id AND mode='meeting'
+      `),
+      // Crash recovery: any leftover 'pending' row from a previous launch is
+      // flipped to 'failed' so the UI shows "Generate summary" (retry).
+      recoverStaleSummaryPending: this.db.prepare(`
+        UPDATE sessions
+        SET summary_status='failed'
+        WHERE summary_status='pending'
       `),
 
       // ── chunks ──

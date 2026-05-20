@@ -1,9 +1,10 @@
 /**
  * DarwinSecureStorage — Electron `safeStorage` wrapper.
  *
- * Architecture: §12.2 — encrypted Groq key stored as a base64 string in
- * JobStore.kv. The cleartext only leaves Keychain inside the GroqAsrClient's
- * `getApiKey` callback (composition reads + decrypts it on demand).
+ * Architecture: §12.2 — encrypts arbitrary strings into a base64 blob that
+ * round-trips via the OS keyring (macOS Keychain, Windows DPAPI). Currently
+ * used by `TwinMindAuthProvider` to encrypt the Firebase refresh token at
+ * rest in `GlobalDb.users.refresh_token_enc`.
  *
  * The same code works on Windows (DPAPI) and macOS (Keychain) because
  * `safeStorage` abstracts both; the "darwin" naming reflects file placement,

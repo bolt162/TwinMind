@@ -66,12 +66,22 @@ export interface AppSettings {
   };
   advanced: {
     logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error';
-    asrProvider: 'groq' | 'twinmind' | 'mock';
+    /**
+     * 'twinmind' is the real backend; 'mock' is for tests / dev. Groq was
+     * removed when we unified on the TwinMind backend.
+     */
+    asrProvider: 'twinmind' | 'mock';
     /** §7.11: RMS dBFS threshold; chunks below this skip the API call. */
     vadSilenceThresholdDbfs: number;
   };
-  onboardingCompletedAt: number | null;
 }
+
+/**
+ * NOTE on machine-scoped state: `onboardingCompletedAt` used to live here.
+ * It is now stored in `<userData>/global.db` (`GlobalDb.wizard`) so it is
+ * shared across all users on the machine — permissions are macOS-scoped, so
+ * the wizard's gate is too. Read via `wizard.getStatus` IPC.
+ */
 
 /** Application defaults. Used on first run and when the file is invalid. */
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -86,8 +96,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hotkeys: { primary: null },
   privacy: { sendAudioToProvider: true, autoDeleteOlderThanDays: 30 },
   meetingDetection: { enabled: true, autoStart: false },
-  advanced: { logLevel: 'info', asrProvider: 'groq', vadSilenceThresholdDbfs: -50 },
-  onboardingCompletedAt: null,
+  advanced: { logLevel: 'info', asrProvider: 'twinmind', vadSilenceThresholdDbfs: -50 },
 };
 
 /** Result of a `load()` call: settings plus a flag if a `.broken` backup was made. */
@@ -212,10 +221,25 @@ function mergeDefaults(user: Partial<AppSettings>): AppSettings {
       ...DEFAULT_SETTINGS.meetingDetection,
       ...(user.meetingDetection ?? {}),
     },
-    advanced: { ...DEFAULT_SETTINGS.advanced, ...(user.advanced ?? {}) },
-    onboardingCompletedAt:
-      user.onboardingCompletedAt ?? DEFAULT_SETTINGS.onboardingCompletedAt,
+    advanced: mergeAdvanced(user.advanced),
   };
+}
+
+/**
+ * Migrate `advanced.asrProvider`: legacy installs may have `'groq'` saved.
+ * We map it to the new default ('twinmind') silently so a returning user
+ * starts on the supported backend instead of erroring out.
+ */
+function mergeAdvanced(
+  user: Partial<AppSettings>['advanced'],
+): AppSettings['advanced'] {
+  const merged = { ...DEFAULT_SETTINGS.advanced, ...(user ?? {}) } as AppSettings['advanced'] & {
+    asrProvider: string;
+  };
+  if (merged.asrProvider !== 'twinmind' && merged.asrProvider !== 'mock') {
+    merged.asrProvider = 'twinmind';
+  }
+  return merged as AppSettings['advanced'];
 }
 
 /**

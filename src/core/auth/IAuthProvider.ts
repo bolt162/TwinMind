@@ -32,8 +32,14 @@ export interface IAuthProvider {
    */
   onAuthChange(cb: (state: AuthState) => void): AuthUnsubscribe;
 
-  /** Optional: start a sign-in flow. Undefined on providers that have no UI. */
-  signIn?(): Promise<void>;
+  /**
+   * Optional: start a sign-in flow. Undefined on providers that have no UI.
+   * Return type is `unknown` so concrete providers can surface structured
+   * results (e.g. TwinMindAuthProvider returns a SignInResult with error
+   * classification) without the interface forcing every provider into the
+   * same shape.
+   */
+  signIn?(): Promise<unknown>;
 
   /** Optional: sign out and clear the persisted token. */
   signOut?(): Promise<void>;

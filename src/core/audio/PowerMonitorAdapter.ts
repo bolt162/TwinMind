@@ -20,9 +20,18 @@ import type { RecordingOrchestrator } from './RecordingOrchestrator';
 import type { JobStore } from '@core/storage/JobStore';
 import { type Logger, noopLogger } from '@core/observability/Logger';
 
-/** Structural subset of Electron's powerMonitor we depend on. */
+/**
+ * Structural subset of Electron's powerMonitor we depend on. `removeListener`
+ * is used by `destroy()` to release the per-user adapter when the user signs
+ * out — without it, a stale adapter from a previous session would still fire
+ * on the next sleep/wake.
+ */
 export interface PowerMonitorLike {
   on(event: 'suspend' | 'resume' | 'lock-screen' | 'unlock-screen', cb: () => void): void;
+  removeListener?(
+    event: 'suspend' | 'resume' | 'lock-screen' | 'unlock-screen',
+    cb: () => void,
+  ): void;
 }
 
 export interface PowerMonitorAdapterDeps {
@@ -41,11 +50,14 @@ export class PowerMonitorAdapter {
   private readonly emitter = new EventEmitter();
   /** Tracks the last suspended session so we can offer resume on wake. */
   private suspendedSessionId: string | null = null;
+  /** Refs to the registered handlers so destroy() can unsubscribe them. */
+  private readonly suspendHandler: () => void;
+  private readonly resumeHandler: () => void;
 
   /** Construct over the deps; immediately subscribes to the powerMonitor. */
   constructor(private readonly deps: PowerMonitorAdapterDeps) {
     const log = deps.logger ?? noopLogger;
-    deps.powerMonitor.on('suspend', () => {
+    this.suspendHandler = () => {
       // pauseForSleep handles the close-chunk + stop-session control flow AND
       // flips the session row to status='paused_by_sleep' atomically (returns
       // the sessionId so we can prompt on resume).
@@ -53,17 +65,17 @@ export class PowerMonitorAdapter {
       if (!this.suspendedSessionId) {
         log.debug('suspend received but no active recording');
       }
-    });
-
-    deps.powerMonitor.on('resume', () => {
+    };
+    this.resumeHandler = () => {
       const sid = this.suspendedSessionId;
       this.suspendedSessionId = null;
       if (!sid) return;
       // The full resume UX is handled by composition: show a notification,
       // and only re-arm capture if the user clicks "Resume".
       this.emitter.emit('resume_prompt', { sessionId: sid } satisfies ResumePromptEvent);
-    });
-
+    };
+    deps.powerMonitor.on('suspend', this.suspendHandler);
+    deps.powerMonitor.on('resume', this.resumeHandler);
     // lock-screen / unlock-screen intentionally not handled — recording
     // continues through password entry.
   }
@@ -72,5 +84,16 @@ export class PowerMonitorAdapter {
   onResumePrompt(cb: (e: ResumePromptEvent) => void): () => void {
     this.emitter.on('resume_prompt', cb);
     return () => this.emitter.off('resume_prompt', cb);
+  }
+
+  /**
+   * Unsubscribe from powerMonitor and drop the orchestrator reference. Called
+   * by main.ts when the active user changes — keeps a previous user's adapter
+   * from firing into a now-closed orchestrator.
+   */
+  destroy(): void {
+    this.deps.powerMonitor.removeListener?.('suspend', this.suspendHandler);
+    this.deps.powerMonitor.removeListener?.('resume', this.resumeHandler);
+    this.emitter.removeAllListeners();
   }
 }
