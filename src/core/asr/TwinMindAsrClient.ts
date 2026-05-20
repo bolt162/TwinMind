@@ -118,12 +118,6 @@ export class TwinMindAsrClient implements IAsrClient {
       throw new AsrError('auth', `failed to get access token: ${describeError(err)}`, err);
     }
 
-    // Wall-clock at the moment this chunk is dispatched to /choose. Captured
-    // *before* the first POST so the value reflects the dispatch attempt the
-    // user sees in the UI, not a refresh-retry that may follow. Renderer
-    // formats this as `HH:MM` for meetings.
-    const clockTimeMs = Date.now();
-
     let resp = await this.doRequest(req, audioBytes, filename, accessToken);
 
     // One-shot 401 refresh-retry path. Anything else propagates as-is.
@@ -148,7 +142,7 @@ export class TwinMindAsrClient implements IAsrClient {
       throw new AsrError('unknown', 'failed to parse TwinMind response body', err);
     }
 
-    return this.toSegment(req, json, clockTimeMs);
+    return this.toSegment(req, json);
   }
 
   // ─── Internals ──────────────────────────────────────────────────────────
@@ -173,6 +167,12 @@ export class TwinMindAsrClient implements IAsrClient {
       'chunk_duration',
       String(Math.max(0, Math.round((req.endOffsetMs - req.startOffsetMs) / 1000))),
     );
+    // Wall-clock window of the chunk's audio, ISO 8601. Matches V1's wire
+    // format. Computed from `session.started_at + chunk.{start,end}_ms` by
+    // the UploadQueue — NOT from Date.now() — so the timestamps stay
+    // correct when uploads are delayed (queue backup, retry, crash recovery).
+    form.append('start_time', new Date(req.chunkWallClockStartMs).toISOString());
+    form.append('end_time', new Date(req.chunkWallClockEndMs).toISOString());
     // Per-mode model selection. Meeting mode pins `twinmind-pro` (V1
     // behavior). Dictation now OMITS the `model` field entirely so the
     // backend's `/api/v2/transcribe/choose` endpoint picks its default —
@@ -233,11 +233,7 @@ export class TwinMindAsrClient implements IAsrClient {
     );
   }
 
-  private toSegment(
-    req: TranscribeRequest,
-    json: TwinMindResponse,
-    clockTimeMs: number,
-  ): TranscriptSegment {
+  private toSegment(req: TranscribeRequest, json: TwinMindResponse): TranscriptSegment {
     const text = (json.transcript ?? json.text ?? '').toString();
     const words: WordTiming[] | undefined = json.words?.map((w) => ({
       word: w.word,
@@ -260,7 +256,10 @@ export class TwinMindAsrClient implements IAsrClient {
       model: reportedModel,
       durationMs: req.endOffsetMs - req.startOffsetMs,
       ...(json.language ? { language: json.language } : {}),
-      clockTimeMs,
+      // Echo the audio-start wall-clock back so UploadQueue can persist it
+      // as `transcripts.clock_time_ms`. Same value sent to the backend as
+      // `start_time` — single source of truth.
+      clockTimeMs: req.chunkWallClockStartMs,
     };
   }
 }

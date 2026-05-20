@@ -39,6 +39,18 @@ export interface TranscribeRequest {
   readonly endOffsetMs: number;
   /** Length of the leading overlap copied from the prior chunk (ms). */
   readonly overlapPrefixMs: number;
+  /**
+   * Wall-clock epoch ms when this chunk's *audio* started/ended being
+   * captured. Computed by the caller (UploadQueue) as
+   * `session.started_at + chunk.start_ms` / `+ chunk.end_ms`, NOT
+   * `Date.now()` at upload time — that drifts when uploads are delayed.
+   * Used both for the `start_time` / `end_time` ISO fields sent to the
+   * backend (V1 wire compat) and as the value stored in
+   * `transcripts.clock_time_ms` for the meeting transcript view's
+   * `HH:MM` rendering.
+   */
+  readonly chunkWallClockStartMs: number;
+  readonly chunkWallClockEndMs: number;
   /** BCP-47 language hint, or undefined for auto-detect. */
   readonly language?: string;
   /** Tail of the previous chunk's transcript, used as an ASR priming prompt. */
@@ -58,11 +70,12 @@ export interface TranscriptSegment {
   /** BCP-47 language detected by the provider, if any. */
   readonly language?: string;
   /**
-   * Wall-clock epoch ms captured on the desktop immediately before the
-   * chunk is POSTed to the transcribe endpoint. The meeting transcript
-   * view renders this as `HH:MM` (e.g. "14:02") instead of the relative
-   * `MM:SS – MM:SS` range. Undefined for the VAD-skip path (no /choose
-   * call ever happens) and for the mock provider.
+   * Wall-clock epoch ms of the chunk's *audio start* — i.e.,
+   * `session.started_at + chunk.start_ms`. Computed by the caller and
+   * echoed back so it can be persisted alongside the transcript. The
+   * meeting transcript view renders this as `HH:MM` (e.g. "14:02")
+   * instead of the relative `MM:SS – MM:SS` range. Undefined for the
+   * VAD-skip path (no /choose call) and for the mock provider.
    */
   readonly clockTimeMs?: number;
 }

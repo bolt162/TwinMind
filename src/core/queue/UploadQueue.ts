@@ -153,6 +153,19 @@ export class UploadQueue {
         return;
       }
 
+      // Anchor for the chunk's wall-clock window. Computed from session
+      // start + chunk offset (NOT Date.now() at upload) so the values are
+      // correct even when the queue is delayed (offline + retry, crash
+      // recovery, etc.). The session row exists because chunks cascade-
+      // delete with their session — but we still guard defensively.
+      const session = this.store.getSession(chunk.session_id);
+      if (!session) {
+        this.store.recordChunkPermanentFailure(chunk.id, 'unknown', 'session_missing');
+        return;
+      }
+      const chunkWallClockStartMs = session.started_at + chunk.start_ms;
+      const chunkWallClockEndMs = session.started_at + chunk.end_ms;
+
       // Step 2: actually transcribe. AsrError instances are expected failure
       // signals; anything else is a programmer bug we'll classify as 'unknown'.
       let segment: TranscriptSegment;
@@ -166,6 +179,8 @@ export class UploadQueue {
           startOffsetMs: chunk.start_ms,
           endOffsetMs: chunk.end_ms,
           overlapPrefixMs: chunk.overlap_prefix_ms,
+          chunkWallClockStartMs,
+          chunkWallClockEndMs,
         });
       } catch (e) {
         this.handleFailure(chunk, e);

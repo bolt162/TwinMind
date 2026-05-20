@@ -11,6 +11,8 @@ const req: TranscribeRequest = {
   startOffsetMs: 0,
   endOffsetMs: 30_000,
   overlapPrefixMs: 0,
+  chunkWallClockStartMs: 1_700_000_000_000,
+  chunkWallClockEndMs: 1_700_000_030_000,
 };
 
 describe('MockAsrClient', () => {
