@@ -353,8 +353,13 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
     clock,
     logger,
     // Re-read settings on every session start so the picker change takes
-    // effect on the *next* recording without a restart.
-    getMicDeviceId: () => settings.load().settings.recording.inputDeviceId,
+    // effect on the *next* recording without a restart. When the user
+    // hasn't pinned a specific device (`inputDeviceId === null`),
+    // resolveMicDeviceId() prefers the built-in mic over whatever macOS
+    // currently considers the system default — the user explicitly asked
+    // for that bias since the Mac built-in has the most consistent ASR
+    // quality (no Bluetooth A2DP→HFP profile-switch warmup, no USB jitter).
+    getMicDeviceId: () => resolveMicDeviceId(settings, logger),
   });
   orchestrator.on('state_changed', (s) => {
     if (s.state === 'recording') {
@@ -408,8 +413,10 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
     crash: shell.crash,
     analytics: shell.analytics,
     notifySettingsChanged() {
-      const nextId = settings.load().settings.recording.inputDeviceId;
-      orchestrator.setMicDevice(nextId);
+      // Same null → built-in resolution as session-start. If the user
+      // cleared their pinned device while recording, the live capture
+      // switches to the built-in mic rather than the OS default.
+      orchestrator.setMicDevice(resolveMicDeviceId(settings, logger));
     },
     async shutdown() {
       const wasRecording = orchestrator.state === 'recording';
@@ -515,6 +522,37 @@ function todayStamp(): string {
     String(d.getMonth() + 1).padStart(2, '0'),
     String(d.getDate()).padStart(2, '0'),
   ].join('-');
+}
+
+/**
+ * Resolve the device id to open for recording. Honors the user's pinned
+ * pick when set; when null, prefers the Mac's built-in microphone — the
+ * Settings UI documents this as the "recommended" default. Falls back to
+ * null (OS default) when no built-in is enumerated, which is the same
+ * behavior as before this resolver existed.
+ *
+ * Failures of the native enumeration call (Linux/Windows builds where the
+ * darwin addon isn't present, or a CoreAudio hiccup) degrade to null
+ * silently — the audio-process can still open the OS default mic.
+ */
+function resolveMicDeviceId(settings: SettingsStore, logger: Logger): string | null {
+  const stored = settings.load().settings.recording.inputDeviceId;
+  if (stored !== null) return stored;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const native = require('@twinmind/coreaudio-darwin') as {
+      listInputDevices?: () => Array<{ id: string; kind: string }>;
+    };
+    const devices =
+      typeof native.listInputDevices === 'function' ? native.listInputDevices() : [];
+    const builtIn = devices.find((d) => d.kind === 'built_in');
+    return builtIn?.id ?? null;
+  } catch (err) {
+    logger.warn('resolveMicDeviceId: native device listing failed; falling back to OS default', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 // ─── Backward-compat: re-export GLOBAL_MIGRATIONS so callers don't need a
