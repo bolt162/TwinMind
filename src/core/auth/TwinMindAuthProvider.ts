@@ -28,15 +28,24 @@
  *   3. UI calls `signOut()` → clear active + refresh_token_enc → state
  *      change fires → renderer re-routes to SignInScreen.
  *
+ * Sign-in flow (post web-handoff): the renderer's "Sign In" button hits
+ * `signIn()`, which opens the TwinMind webapp in the system browser. The
+ * webapp completes Google OAuth and redirects to `twinmind://auth/callback?
+ * token=<code>` — macOS LaunchServices routes that to our `open-url` handler
+ * in main, which calls `deliverAuthCallback(url)` here. We then exchange the
+ * code for a Firebase customToken via `/api/auth/exchange-web-handoff`, then
+ * exchange that customToken for ID + refresh tokens via Firebase's
+ * `signInWithCustomToken` REST endpoint.
+ *
  * Security:
  *   - Refresh token: encrypted at rest via safeStorage; only decrypted into
  *     in-memory `currentRefreshToken`. Never logged.
  *   - Access token: never persisted. In-memory only. Truncated when logged.
  *   - Permanent errors (invalid_refresh_token / revoked / disabled / not
  *     found) trigger forced sign-out — we don't sit on a dead credential.
- *   - Backend POST `/api/v2/google-oauth` is wrapped in try/catch; failure
- *     is non-fatal (V1 does the same — it only blocks calendar features,
- *     not auth itself).
+ *   - The web-handoff code is one-shot — the backend invalidates it on
+ *     first use, so a stolen log message can't be replayed. We still
+ *     redact the `?token=` query value when logging callback URLs.
  */
 
 import type { Logger } from '@core/observability/Logger';
@@ -51,7 +60,6 @@ import {
   type ConfigResolution,
   type TwinMindBackendConfig,
 } from './twinmindBackendConfig';
-import { runOAuthLoopback, type GoogleOAuthTokens } from './oauthLoopback';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -60,6 +68,8 @@ const REFRESH_THRESHOLD_MS = 10 * 60 * 1000; // refresh when <10 min remain
 const REFRESH_MAX_ATTEMPTS = 5;
 const EXPIRY_SAFETY_MS = 60 * 1000; // treat tokens as expired 1 min before exp
 const BACKOFF_BASE_MS = 2_000; // 2s, 4s, 6s, 8s, 10s
+/** Max wait for the twinmind:// callback URL after opening the browser. */
+const SIGN_IN_TIMEOUT_MS = 120 * 1000;
 
 /**
  * Substrings (case-insensitive) in Firebase REST error messages that mean
@@ -97,22 +107,16 @@ export interface TwinMindAuthProviderDeps {
   /** Inject in tests; defaults to globalThis.fetch. */
   readonly fetchImpl?: typeof globalThis.fetch;
   /**
-   * Inject in tests to skip the loopback HTTP server. Returns Google tokens
-   * directly. The optional `signal` is passed in by `signIn()` so tests can
-   * verify cancellation behavior.
-   */
-  readonly runOAuthFlow?: (
-    config: TwinMindBackendConfig,
-    signal: AbortSignal,
-  ) => Promise<GoogleOAuthTokens>;
-  /**
-   * Override the timer scheduler. Production uses setInterval/clearInterval.
-   * Tests can pass `{ setInterval: () => 0 as any, clearInterval: () => {} }`
-   * to avoid background ticks (then drive refresh via `refreshNow` directly).
+   * Override the timer scheduler. Production uses setTimeout/clearTimeout
+   * + setInterval/clearInterval. Tests can supply stubs to keep the test
+   * loop deterministic — periodic refresh + the sign-in callback timeout
+   * both go through this.
    */
   readonly timers?: {
     setInterval(handler: () => void, ms: number): NodeJS.Timeout;
     clearInterval(handle: NodeJS.Timeout): void;
+    setTimeout(handler: () => void, ms: number): NodeJS.Timeout;
+    clearTimeout(handle: NodeJS.Timeout): void;
   };
 }
 
@@ -131,6 +135,19 @@ interface InMemoryTokens {
 
 // ─── Class ──────────────────────────────────────────────────────────────────
 
+/**
+ * In-flight sign-in state: the dance is split across two events — the user
+ * starting the flow (signIn() call) and the OS later delivering a
+ * twinmind:// callback URL via main's open-url handler. We hold the deferred
+ * resolver here so deliverAuthCallback() can complete the promise from the
+ * outside.
+ */
+interface PendingSignIn {
+  resolveUrl: (url: string) => void;
+  rejectUrl: (err: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 export class TwinMindAuthProvider implements IAuthProvider {
   private readonly globalDb: GlobalDb;
   private readonly secureStorage: ISecureStorage;
@@ -138,10 +155,6 @@ export class TwinMindAuthProvider implements IAuthProvider {
   private readonly logger: Logger;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly openBrowser: (url: string) => Promise<void> | void;
-  private readonly runOAuthFlow: (
-    config: TwinMindBackendConfig,
-    signal: AbortSignal,
-  ) => Promise<GoogleOAuthTokens>;
   private readonly timers: NonNullable<TwinMindAuthProviderDeps['timers']>;
 
   /** Snapshot of the resolved config; `null` when env is missing. */
@@ -157,11 +170,11 @@ export class TwinMindAuthProvider implements IAuthProvider {
   /** Promise-lock for concurrent refresh attempts. */
   private inflightRefresh: Promise<string> | null = null;
   /**
-   * AbortController for the currently in-flight signIn(). Set when signIn
-   * starts; cleared when it settles. cancelSignIn() aborts this to make the
-   * loopback server close and the in-flight promise reject early.
+   * Active sign-in awaiting the twinmind:// callback URL from main's
+   * open-url handler. Set when signIn() opens the browser; cleared when the
+   * callback arrives, the timeout fires, or cancelSignIn() is called.
    */
-  private inflightSignInAbort: AbortController | null = null;
+  private pendingSignIn: PendingSignIn | null = null;
 
   private readonly listeners = new Set<(state: AuthState) => void>();
   private initialized = false;
@@ -177,17 +190,11 @@ export class TwinMindAuthProvider implements IAuthProvider {
     }
     this.fetchImpl = f.bind(globalThis);
     this.openBrowser = deps.openBrowser;
-    this.runOAuthFlow =
-      deps.runOAuthFlow ??
-      ((cfg, signal) =>
-        runOAuthLoopback({
-          config: cfg,
-          openBrowser: this.openBrowser,
-          abortSignal: signal,
-        }));
     this.timers = deps.timers ?? {
       setInterval: (h, ms) => setInterval(h, ms),
       clearInterval: (handle) => clearInterval(handle),
+      setTimeout: (h, ms) => setTimeout(h, ms),
+      clearTimeout: (handle) => clearTimeout(handle),
     };
 
     if (deps.configResolution.ok) {
@@ -324,9 +331,19 @@ export class TwinMindAuthProvider implements IAuthProvider {
   // ─── Sign in / sign out ──────────────────────────────────────────────────
 
   /**
-   * Run the full Google → Firebase → backend dance, persist tokens, fire
-   * state change. Returns a structured result rather than throwing so the
-   * IPC layer can return the error class to the renderer cleanly.
+   * Run the full web-handoff dance:
+   *   1. Open the TwinMind webapp in the system browser.
+   *   2. Wait for the webapp to redirect to `twinmind://auth/callback?token=…`
+   *      (delivered via `deliverAuthCallback()` from main's open-url handler).
+   *   3. POST the code to `/api/auth/exchange-web-handoff` → Firebase custom
+   *      token.
+   *   4. POST the custom token to Firebase's `signInWithCustomToken` REST
+   *      endpoint → Firebase ID + refresh tokens.
+   *   5. Persist + flip state.
+   *
+   * Returns a structured result rather than throwing so the IPC layer can
+   * map it cleanly to the renderer's `cancelled` / `network` / `unknown`
+   * variants.
    */
   async signIn(): Promise<SignInResult> {
     if (!this.config) {
@@ -337,26 +354,17 @@ export class TwinMindAuthProvider implements IAuthProvider {
       };
     }
 
-    // If a previous signIn() is somehow still in flight (renderer double-
-    // click, race), abort it before starting a new one so the loopback
-    // server doesn't EADDRINUSE on port 3000.
-    this.inflightSignInAbort?.abort();
-    const abort = new AbortController();
-    this.inflightSignInAbort = abort;
+    // If a previous signIn() is still waiting for a callback (renderer
+    // double-click, race), cancel it so we don't end up with two listeners
+    // claiming the same delivery.
+    this.cancelSignIn();
 
-    let googleTokens: GoogleOAuthTokens;
+    let callbackUrl: string;
     try {
-      googleTokens = await this.runOAuthFlow(this.config, abort.signal);
+      callbackUrl = await this.openBrowserAndAwaitCallback(this.config.webLoginUrl);
     } catch (err) {
-      // The loopback module surfaces "timeout" → user closed the window /
-      // never returned; "cancelled" → cancelSignIn() called. Both map to
-      // `cancelled` so the UI shows a calm "try again" rather than a scary
-      // error.
       const msg = err instanceof Error ? err.message : String(err);
-      const isCancel = /cancelled|timed out|state mismatch|missing required tokens|EADDRINUSE/i.test(msg);
-      // Only clear inflight if this is OUR abort — if a newer signIn already
-      // replaced it, don't clobber that. Same-identity check via reference.
-      if (this.inflightSignInAbort === abort) this.inflightSignInAbort = null;
+      const isCancel = /cancelled|timed out/i.test(msg);
       return {
         ok: false,
         error: isCancel ? 'cancelled' : 'unknown',
@@ -364,21 +372,46 @@ export class TwinMindAuthProvider implements IAuthProvider {
       };
     }
 
-    let firebase: FirebaseSignInResult;
+    // Extract `?token=…` (URL param is `token`; the backend body field is `code`).
+    let code: string;
     try {
-      firebase = await this.exchangeWithFirebase(googleTokens.idToken);
+      const parsed = new URL(callbackUrl);
+      const t = parsed.searchParams.get('token');
+      if (!t || t.length === 0) {
+        throw new Error('callback missing token query parameter');
+      }
+      code = t;
+    } catch (err) {
+      return {
+        ok: false,
+        error: 'unknown',
+        message: `Invalid sign-in callback: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    // Step 1: backend exchanges code → Firebase customToken.
+    let customToken: string;
+    try {
+      customToken = await this.exchangeWebHandoff(code);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { ok: false, error: classifyNetworkError(msg), message: msg };
     }
 
-    const userId = firebase.userId;
-    const profile = parseRawUserInfo(firebase.rawUserInfo);
+    // Step 2: Firebase exchanges customToken → idToken + refreshToken.
+    let firebase: FirebaseSignInResult;
+    try {
+      firebase = await this.exchangeFirebaseCustomToken(customToken);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: classifyNetworkError(msg), message: msg };
+    }
+
     const user: InMemoryUser = {
-      id: userId,
+      id: firebase.userId,
       email: firebase.email,
-      name: firebase.displayName ?? profile.name ?? null,
-      photoUrl: profile.picture ? toHighResPhoto(profile.picture) : null,
+      name: firebase.displayName,
+      photoUrl: firebase.photoUrl,
     };
 
     const expiresAt = this.clock.now() + Math.max(0, firebase.expiresInSec * 1000);
@@ -417,30 +450,74 @@ export class TwinMindAuthProvider implements IAuthProvider {
     this.startRefreshTimer();
     this.emitChange();
 
-    // Backend sync — non-fatal. The user is signed in regardless.
-    this.postAuthCodeToBackend(
-      googleTokens.code,
-      firebase.idToken,
-      googleTokens.redirectUri,
-    ).catch((err) => {
-      this.logger.warn('auth_provider: backend sync failed (non-fatal)', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-
-    // Sign-in succeeded — release the in-flight abort slot.
-    if (this.inflightSignInAbort === abort) this.inflightSignInAbort = null;
     return { ok: true };
   }
 
   /**
-   * Abort the currently in-flight signIn() — closes the loopback server
-   * and causes the in-flight promise to resolve with `error: 'cancelled'`.
-   * No-op when no sign-in is running. Called by the AUTH_CANCEL_SIGN_IN
-   * IPC handler when the user clicks Cancel on SignInScreen.
+   * Called by main's `open-url` / `second-instance` handlers when the
+   * twinmind:// callback URL is delivered. If a `signIn()` is waiting, it
+   * picks the URL up and finishes the exchange. If no sign-in is in flight
+   * (stale link clicked later, race), the URL is silently dropped.
+   *
+   * Never logs the token query value — only the URL's scheme + path, so a
+   * shoulder-surfer reading the log can't replay the credential.
+   */
+  deliverAuthCallback(url: string): void {
+    if (!this.pendingSignIn) {
+      const safe = url.split('?')[0] ?? url;
+      this.logger.warn('auth_provider: callback received with no in-flight signIn', {
+        url: safe,
+      });
+      return;
+    }
+    this.pendingSignIn.resolveUrl(url);
+    this.pendingSignIn = null;
+  }
+
+  /**
+   * Reject the pending sign-in (if any) with a cancelled error. Called by
+   * the AUTH_CANCEL_SIGN_IN IPC handler when the user clicks Cancel on
+   * SignInScreen. Idempotent — no-op when nothing is pending.
    */
   cancelSignIn(): void {
-    this.inflightSignInAbort?.abort();
+    if (!this.pendingSignIn) return;
+    this.pendingSignIn.rejectUrl(new Error('Sign-in cancelled'));
+    this.pendingSignIn = null;
+  }
+
+  /**
+   * Open the system browser to `webLoginUrl` and wait — up to
+   * SIGN_IN_TIMEOUT_MS — for `deliverAuthCallback` to be called by main's
+   * URL handler. Browser-open failures are non-fatal: even if openExternal
+   * rejects, the user may have already navigated there in another tab.
+   */
+  private openBrowserAndAwaitCallback(webLoginUrl: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const timer = this.timers.setTimeout(() => {
+        this.pendingSignIn = null;
+        reject(new Error('Sign-in timed out'));
+      }, SIGN_IN_TIMEOUT_MS);
+
+      this.pendingSignIn = {
+        resolveUrl: (url) => {
+          this.timers.clearTimeout(timer);
+          resolve(url);
+        },
+        rejectUrl: (err) => {
+          this.timers.clearTimeout(timer);
+          reject(err);
+        },
+        timer,
+      };
+
+      Promise.resolve(this.openBrowser(webLoginUrl)).catch((err) => {
+        // Logged but not fatal — the user can still complete the flow if
+        // the browser was already open at the right URL.
+        this.logger.warn('auth_provider: openBrowser failed', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    });
   }
 
   /**
@@ -615,20 +692,56 @@ export class TwinMindAuthProvider implements IAuthProvider {
     }
   }
 
-  // ─── Internals: Firebase REST + backend POST + user-info parsing ─────────
+  // ─── Internals: TwinMind exchange + Firebase REST ────────────────────────
 
-  private async exchangeWithFirebase(googleIdToken: string): Promise<FirebaseSignInResult> {
+  /**
+   * Exchange the web-handoff code for a Firebase customToken. The code is
+   * one-shot and the backend invalidates it on first use. No auth header —
+   * the code itself is the credential. We still send the Vercel deployment-
+   * protection-bypass header so staging URLs work (no-op on production).
+   */
+  private async exchangeWebHandoff(code: string): Promise<string> {
     if (!this.config) throw new TwinMindConfigMissingError(this.configMissing ?? []);
-    const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=${encodeURIComponent(
+    const url = `${this.config.backendUrl}/api/auth/exchange-web-handoff`;
+    const resp = await this.fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-vercel-protection-bypass': this.config.vercelProtectionBypass,
+      },
+      body: JSON.stringify({ code }),
+    });
+    const dataRaw = (await resp.json().catch(() => ({}))) as unknown;
+    if (!resp.ok) {
+      const msg = readErrorMessage(dataRaw);
+      throw new Error(`exchange-web-handoff failed: ${msg}`);
+    }
+    // Response shape: { data: { customToken: "<firebase-custom-token-jwt>" } }
+    const data = dataRaw as { data?: { customToken?: unknown } };
+    const ct = data?.data?.customToken;
+    if (typeof ct !== 'string' || ct.length === 0) {
+      throw new Error('exchange-web-handoff: malformed response (missing data.customToken)');
+    }
+    return ct;
+  }
+
+  /**
+   * Exchange the backend-minted Firebase custom token for Firebase ID +
+   * refresh tokens. Identity claims (email / name / picture / transformed_sub)
+   * ride inside the custom token and propagate into the resulting ID token's
+   * payload — we decode the JWT to recover them since
+   * `signInWithCustomToken` returns only tokens.
+   */
+  private async exchangeFirebaseCustomToken(customToken: string): Promise<FirebaseSignInResult> {
+    if (!this.config) throw new TwinMindConfigMissingError(this.configMissing ?? []);
+    const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${encodeURIComponent(
       this.config.firebaseWebApiKey,
     )}`;
     const resp = await this.fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        postBody: `id_token=${encodeURIComponent(googleIdToken)}&providerId=google.com`,
-        requestUri: 'http://127.0.0.1',
-        returnIdpCredential: true,
+        token: customToken,
         returnSecureToken: true,
         tenantId: this.config.firebaseTenantId,
       }),
@@ -636,61 +749,44 @@ export class TwinMindAuthProvider implements IAuthProvider {
     const dataRaw = (await resp.json().catch(() => ({}))) as unknown;
     if (!resp.ok) {
       const msg = readErrorMessage(dataRaw);
-      throw new Error(`firebase signInWithIdp failed: ${msg}`);
+      throw new Error(`firebase signInWithCustomToken failed: ${msg}`);
     }
     const data = dataRaw as {
       idToken?: string;
       refreshToken?: string;
       expiresIn?: string | number;
-      localId?: string;
-      email?: string;
-      displayName?: string;
-      rawUserInfo?: string;
     };
-    if (!data.idToken || !data.refreshToken || !data.email || !data.localId) {
-      throw new Error('firebase signInWithIdp: malformed response');
+    if (!data.idToken || !data.refreshToken) {
+      throw new Error('firebase signInWithCustomToken: malformed response');
     }
     const expiresInSec =
       typeof data.expiresIn === 'string'
         ? parseInt(data.expiresIn, 10)
         : data.expiresIn ?? 3600;
 
-    const userId = extractTransformedSub(data.idToken) ?? data.localId;
+    const claims = decodeJwtPayload(data.idToken);
+    const userId = pickStringClaim(claims, [
+      'transformed_sub',
+      'transfromed_sub', // tolerated backend typo, kept for backwards compat
+      'user_id',
+      'sub',
+    ]);
+    if (!userId) {
+      throw new Error('firebase signInWithCustomToken: ID token has no usable subject claim');
+    }
+    const email = pickStringClaim(claims, ['email']) ?? '';
+    const displayName = pickStringClaim(claims, ['name']);
+    const pictureRaw = pickStringClaim(claims, ['picture']);
 
     return {
       idToken: data.idToken,
       refreshToken: data.refreshToken,
       expiresInSec,
       userId,
-      email: data.email,
-      displayName: data.displayName ?? null,
-      rawUserInfo: data.rawUserInfo ?? null,
+      email,
+      displayName,
+      photoUrl: pictureRaw ? toHighResPhoto(pictureRaw) : null,
     };
-  }
-
-  private async postAuthCodeToBackend(
-    authCode: string,
-    firebaseIdToken: string,
-    redirectUri: string,
-  ): Promise<void> {
-    if (!this.config) return;
-    const resp = await this.fetchImpl(`${this.config.backendUrl}/api/v2/google-oauth`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${firebaseIdToken}`,
-        'x-vercel-protection-bypass': this.config.vercelProtectionBypass,
-      },
-      body: JSON.stringify({
-        authCode,
-        tenantId: this.config.firebaseTenantId,
-        redirectUri,
-      }),
-    });
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => '');
-      throw new Error(`backend sync HTTP ${resp.status}: ${body.slice(0, 200)}`);
-    }
   }
 
   // ─── Internals: listeners ────────────────────────────────────────────────
@@ -718,7 +814,7 @@ interface FirebaseSignInResult {
   readonly userId: string;
   readonly email: string;
   readonly displayName: string | null;
-  readonly rawUserInfo: string | null;
+  readonly photoUrl: string | null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -726,38 +822,35 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Decode the middle segment of a JWT and read `transformed_sub` (with a
- * tolerant fallback for the backend's known typo). Returns null on any
- * parse failure — caller falls back to the Firebase uid.
+ * Decode the middle (payload) segment of a JWT. Returns an empty record on
+ * any parse failure — callers degrade gracefully via `pickStringClaim` rather
+ * than throwing. We do NOT verify the signature here; Firebase already did
+ * that when minting the token, and we only consume it to read its claims.
  */
-function extractTransformedSub(jwt: string): string | null {
+function decodeJwtPayload(jwt: string): Record<string, unknown> {
   try {
     const segments = jwt.split('.');
-    if (segments.length < 2) return null;
+    if (segments.length < 2) return {};
     const payloadStr = Buffer.from(segments[1]!, 'base64url').toString('utf8');
-    const payload = JSON.parse(payloadStr) as Record<string, unknown>;
-    const v = payload['transformed_sub'] ?? payload['transfromed_sub'];
-    return typeof v === 'string' ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Parse the rawUserInfo JSON-string field from signInWithIdp. */
-function parseRawUserInfo(raw: string | null): { name?: string; picture?: string } {
-  if (!raw) return {};
-  try {
-    const obj = JSON.parse(raw) as Record<string, unknown>;
-    const name = typeof obj['name'] === 'string' ? (obj['name'] as string) : undefined;
-    const picture =
-      typeof obj['picture'] === 'string' ? (obj['picture'] as string) : undefined;
-    const result: { name?: string; picture?: string } = {};
-    if (name !== undefined) result.name = name;
-    if (picture !== undefined) result.picture = picture;
-    return result;
+    const parsed = JSON.parse(payloadStr) as unknown;
+    return typeof parsed === 'object' && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : {};
   } catch {
     return {};
   }
+}
+
+/** First non-empty string value in `claims` matching one of the keys, or null. */
+function pickStringClaim(
+  claims: Record<string, unknown>,
+  keys: readonly string[],
+): string | null {
+  for (const k of keys) {
+    const v = claims[k];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
 }
 
 /** Bump Google profile photos to the high-res variant we want for display. */

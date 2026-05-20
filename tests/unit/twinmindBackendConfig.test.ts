@@ -9,7 +9,6 @@ function fullEnv(): NodeJS.ProcessEnv {
     FIREBASE_WEB_API_KEY: 'AIza-test',
     FIREBASE_TENANT_ID: 'TestTenant-abc',
     FIREBASE_PROJECT_ID: 'test-project',
-    GOOGLE_OAUTH_CLIENT_ID: '12345.apps.googleusercontent.com',
     TWINMIND_BACKEND_URL: 'https://api-staging.example/',
     VERCEL_PROTECTION_BYPASS: 'bypass-token',
     TWINMIND_TRANSCRIBE_URL: 'https://api-staging.example/api/v2/transcribe',
@@ -25,9 +24,19 @@ describe('resolveTwinMindBackendConfig', () => {
       expect(r.config.firebaseWebApiKey).toBe('AIza-test');
       expect(r.config.firebaseTenantId).toBe('TestTenant-abc');
       expect(r.config.firebaseProjectId).toBe('test-project');
-      expect(r.config.googleOAuthClientId).toBe('12345.apps.googleusercontent.com');
       expect(r.config.vercelProtectionBypass).toBe('bypass-token');
+      // Default web-login URL is supplied when env var is absent.
+      expect(r.config.webLoginUrl).toContain('via_desktop');
     }
+  });
+
+  it('honors TWINMIND_WEB_LOGIN_URL override when set', () => {
+    const r = resolveTwinMindBackendConfig({
+      ...fullEnv(),
+      TWINMIND_WEB_LOGIN_URL: 'https://staging-webapp.example/login?via_desktop',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.config.webLoginUrl).toBe('https://staging-webapp.example/login?via_desktop');
   });
 
   it('strips trailing slashes from the backend URL', () => {
@@ -49,10 +58,10 @@ describe('resolveTwinMindBackendConfig', () => {
 
   it('reports only the variable that is missing', () => {
     const env = fullEnv();
-    delete env.GOOGLE_OAUTH_CLIENT_ID;
+    delete env.VERCEL_PROTECTION_BYPASS;
     const r = resolveTwinMindBackendConfig(env);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.missing).toEqual(['GOOGLE_OAUTH_CLIENT_ID']);
+    if (!r.ok) expect(r.missing).toEqual(['VERCEL_PROTECTION_BYPASS']);
   });
 
   it('treats whitespace-only values as missing', () => {

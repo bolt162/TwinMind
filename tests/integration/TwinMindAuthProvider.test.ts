@@ -5,8 +5,12 @@
  * exercised end-to-end) but stubs everything network/OS-level:
  *   - secureStorage: base64 round-trip; no Keychain.
  *   - fetch: a small queueable mock.
- *   - runOAuthFlow: returns canned Google tokens without opening a browser.
+ *   - openBrowser: records the URL instead of launching the system browser.
  *   - timers: no-op so background ticks don't race the test.
+ *
+ * The web-handoff dance is driven by calling
+ * `provider.deliverAuthCallback('twinmind://...')` to simulate macOS routing
+ * the redirect URL through main's `open-url` handler.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -29,12 +33,12 @@ const TEST_CONFIG: ConfigResolution = {
     firebaseWebApiKey: 'AIza-test',
     firebaseTenantId: 'TestTenant',
     firebaseProjectId: 'test-proj',
-    googleOAuthClientId: '123.apps.googleusercontent.com',
     backendUrl: 'https://api.example',
     vercelProtectionBypass: 'bypass',
     transcribeUrl: 'https://api.example/api/v2/transcribe',
     summaryUrl: 'https://api.example/api/v2/summary',
     appUrl: 'https://app.example',
+    webLoginUrl: 'https://webapp.example/login?via_desktop',
     dictationModel: 'twinmind-fast',
     meetingModel: 'twinmind-pro',
   },
@@ -98,6 +102,7 @@ function setup(opts: { configResolution?: ConfigResolution } = {}) {
   const globalDb = new GlobalDb(db, clock);
   const secure = new StubSecureStorage();
   const mock = new MockFetch();
+  const openedUrls: string[] = [];
 
   const deps: TwinMindAuthProviderDeps = {
     configResolution: opts.configResolution ?? TEST_CONFIG,
@@ -105,41 +110,71 @@ function setup(opts: { configResolution?: ConfigResolution } = {}) {
     secureStorage: secure,
     clock,
     fetchImpl: mock.fetch,
-    openBrowser: async () => {
-      /* never called when runOAuthFlow is overridden */
+    openBrowser: (url) => {
+      openedUrls.push(url);
     },
-    runOAuthFlow: async () => ({
-      code: 'AUTH_CODE',
-      idToken: 'GOOGLE_ID_TOKEN',
-      redirectUri: 'http://127.0.0.1:3000/auth/callback',
-    }),
     timers: {
       setInterval: () => 0 as unknown as NodeJS.Timeout,
       clearInterval: () => {},
+      setTimeout: () => 0 as unknown as NodeJS.Timeout,
+      clearTimeout: () => {},
     },
   };
   const provider = new TwinMindAuthProvider(deps);
-  return { db, clock, globalDb, secure, mock, provider };
+  return { db, clock, globalDb, secure, mock, provider, openedUrls };
 }
 
 /**
- * Canned Firebase signInWithIdp response. The `idToken` has a real JWT shape
- * so `extractTransformedSub` doesn't blow up — payload is base64url JSON.
+ * Canned Firebase signInWithCustomToken response. The `idToken` is a real
+ * JWT shape so the provider can decode the payload and extract email +
+ * sub + transformed_sub claims from it.
  */
 function firebaseSignInResponse(over: Partial<Record<string, unknown>> = {}) {
+  const idToken = makeJwt({
+    sub: 'firebase-uid-1',
+    email: 'alice@example.com',
+    name: 'Alice Example',
+    picture: 'https://lh3.googleusercontent.com/abc=s96',
+  });
   return {
-    idToken: makeJwt({ sub: 'firebase-uid-1', email: 'alice@example.com' }),
+    idToken,
     refreshToken: 'REFRESH_1',
     expiresIn: '3600',
-    localId: 'firebase-uid-1',
-    email: 'alice@example.com',
-    displayName: 'Alice',
-    rawUserInfo: JSON.stringify({
-      name: 'Alice Example',
-      picture: 'https://lh3.googleusercontent.com/abc=s96',
-    }),
     ...over,
   };
+}
+
+/** Canned response for /api/auth/exchange-web-handoff. */
+function webHandoffResponse(customToken = 'CUSTOM_TOKEN'): unknown {
+  return { data: { customToken } };
+}
+
+/**
+ * Drive the signIn() promise to completion by:
+ *   1. enqueuing the two expected backend responses,
+ *   2. starting the signIn() (which opens the browser stub),
+ *   3. simulating the OS dispatching the twinmind:// callback URL.
+ *
+ * Returns the in-flight signIn promise so callers can await its result.
+ */
+function startSignIn(
+  ctx: ReturnType<typeof setup>,
+  opts: { code?: string; firebaseBody?: Record<string, unknown> } = {},
+): Promise<Awaited<ReturnType<typeof ctx.provider.signIn>>> {
+  const code = opts.code ?? 'WEB_HANDOFF_CODE';
+  ctx.mock.enqueueOnce('/api/auth/exchange-web-handoff', 200, webHandoffResponse());
+  ctx.mock.enqueueOnce(
+    'signInWithCustomToken',
+    200,
+    firebaseSignInResponse(opts.firebaseBody),
+  );
+  const p = ctx.provider.signIn();
+  // Deliver the callback URL on the next tick so the awaiting promise is
+  // already registered when we call.
+  setImmediate(() => {
+    ctx.provider.deliverAuthCallback(`twinmind://auth/callback?token=${code}`);
+  });
+  return p;
 }
 
 function firebaseRefreshResponse(idToken = 'NEW_ACCESS', refresh = 'REFRESH_2') {
@@ -178,27 +213,27 @@ describe('TwinMindAuthProvider — initial state', () => {
 
 describe('TwinMindAuthProvider — signIn', () => {
   it('persists user + encrypted refresh, sets active, fires state change', async () => {
-    const { provider, globalDb, mock, secure } = setup();
-    await provider.initialize();
+    const ctx = setup();
+    await ctx.provider.initialize();
 
     const changes: Array<{ userId: string | null }> = [];
-    provider.onAuthChange((s) => changes.push(s));
+    ctx.provider.onAuthChange((s) => changes.push(s));
 
-    mock.enqueueOnce('signInWithIdp', 200, firebaseSignInResponse());
-    mock.enqueueOnce('/api/v2/google-oauth', 200, { picture: 'pic' });
-
-    const result = await provider.signIn();
+    const result = await startSignIn(ctx);
     expect(result.ok).toBe(true);
-    expect(provider.isAuthenticated()).toBe(true);
-    expect(globalDb.getActiveUserId()).toBe('firebase-uid-1');
+    expect(ctx.provider.isAuthenticated()).toBe(true);
+    expect(ctx.globalDb.getActiveUserId()).toBe('firebase-uid-1');
 
     // Refresh token is stored encrypted.
-    const enc = globalDb.getRefreshTokenEnc('firebase-uid-1');
+    const enc = ctx.globalDb.getRefreshTokenEnc('firebase-uid-1');
     expect(enc).not.toBeNull();
-    expect(secure.decrypt(enc!)).toBe('REFRESH_1');
+    expect(ctx.secure.decrypt(enc!)).toBe('REFRESH_1');
 
     // State change fired.
     expect(changes.at(-1)?.userId).toBe('firebase-uid-1');
+
+    // Browser was opened with the configured web-login URL.
+    expect(ctx.openedUrls).toContain('https://webapp.example/login?via_desktop');
   });
 
   it('returns config_missing when env is incomplete', async () => {
@@ -211,42 +246,41 @@ describe('TwinMindAuthProvider — signIn', () => {
     expect(r.error).toBe('config_missing');
   });
 
-  it('classifies user cancellation as `cancelled`', async () => {
-    const { provider } = setup();
-    // Override runOAuthFlow to simulate the loopback's timeout.
-    (provider as unknown as { runOAuthFlow: () => Promise<never> }).runOAuthFlow = async () => {
-      throw new Error('OAuth flow timed out');
-    };
-    await provider.initialize();
-    const r = await provider.signIn();
+  it('classifies an external cancelSignIn() as `cancelled`', async () => {
+    const ctx = setup();
+    await ctx.provider.initialize();
+    const p = ctx.provider.signIn();
+    // Cancel BEFORE delivering a callback — simulates the user clicking
+    // the Cancel button on SignInScreen.
+    setImmediate(() => ctx.provider.cancelSignIn());
+    const r = await p;
     expect(r.ok).toBe(false);
     expect(r.error).toBe('cancelled');
   });
 
-  it('treats backend POST failure as non-fatal', async () => {
-    const { provider, mock } = setup();
-    await provider.initialize();
-    mock.enqueueOnce('signInWithIdp', 200, firebaseSignInResponse());
-    mock.enqueueOnce('/api/v2/google-oauth', 500, { error: 'oops' });
-    const r = await provider.signIn();
-    expect(r.ok).toBe(true);
-    expect(provider.isAuthenticated()).toBe(true);
-  });
-
-  it('uses transformed_sub for userId when present in the Firebase ID token', async () => {
-    const { provider, mock, globalDb } = setup();
-    await provider.initialize();
+  it('uses transformed_sub for userId when present in the ID token', async () => {
+    const ctx = setup();
+    await ctx.provider.initialize();
     const idTok = makeJwt({
       sub: 'firebase-uid-1',
       transformed_sub: 'auth0|abc123',
       email: 'alice@example.com',
     });
-    mock.enqueueOnce('signInWithIdp', 200, firebaseSignInResponse({ idToken: idTok }));
-    mock.enqueueOnce('/api/v2/google-oauth', 200, {});
-    await provider.signIn();
-    expect(provider.getState().userId).toBe('auth0|abc123');
-    // And the DB stores it under that id.
-    expect(globalDb.getUser('auth0|abc123')).not.toBeNull();
+    const r = await startSignIn(ctx, { firebaseBody: { idToken: idTok } });
+    expect(r.ok).toBe(true);
+    expect(ctx.provider.getState().userId).toBe('auth0|abc123');
+    expect(ctx.globalDb.getUser('auth0|abc123')).not.toBeNull();
+  });
+
+  it('sends the code from the callback URL to /api/auth/exchange-web-handoff', async () => {
+    const ctx = setup();
+    await ctx.provider.initialize();
+    const r = await startSignIn(ctx, { code: 'CODE_XYZ' });
+    expect(r.ok).toBe(true);
+    const handoff = ctx.mock.calls.find((c) => c.url.includes('exchange-web-handoff'));
+    expect(handoff).toBeDefined();
+    const body = JSON.parse(String(handoff!.init?.body)) as { code: string };
+    expect(body.code).toBe('CODE_XYZ');
   });
 });
 
@@ -290,9 +324,7 @@ describe('TwinMindAuthProvider — access tokens', () => {
   async function signedInProvider() {
     const ctx = setup();
     await ctx.provider.initialize();
-    ctx.mock.enqueueOnce('signInWithIdp', 200, firebaseSignInResponse());
-    ctx.mock.enqueueOnce('/api/v2/google-oauth', 200, {});
-    await ctx.provider.signIn();
+    await startSignIn(ctx);
     return ctx;
   }
 
@@ -343,9 +375,7 @@ describe('TwinMindAuthProvider — error classification', () => {
   it('signs out on a permanent refresh error (no retries)', async () => {
     const ctx = setup();
     await ctx.provider.initialize();
-    ctx.mock.enqueueOnce('signInWithIdp', 200, firebaseSignInResponse());
-    ctx.mock.enqueueOnce('/api/v2/google-oauth', 200, {});
-    await ctx.provider.signIn();
+    await startSignIn(ctx);
 
     ctx.clock.advance(3600 * 1000);
     ctx.mock.enqueueOnce('securetoken.googleapis.com/v1/token', 400, {
@@ -363,9 +393,7 @@ describe('TwinMindAuthProvider — signOut', () => {
   it('clears active, refresh token, and in-memory state; fires change', async () => {
     const ctx = setup();
     await ctx.provider.initialize();
-    ctx.mock.enqueueOnce('signInWithIdp', 200, firebaseSignInResponse());
-    ctx.mock.enqueueOnce('/api/v2/google-oauth', 200, {});
-    await ctx.provider.signIn();
+    await startSignIn(ctx);
 
     const changes: Array<string | null> = [];
     ctx.provider.onAuthChange((s) => changes.push(s.userId));

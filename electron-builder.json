@@ -32,7 +32,13 @@
     "extendInfo": {
       "NSMicrophoneUsageDescription": "TwinMind needs microphone access to record your voice for speech-to-text transcription.",
       "NSAccessibilityUsageDescription": "TwinMind needs accessibility to listen for the dictation hotkey and paste transcribed text into other apps.",
-      "NSAudioCaptureUsageDescription": "TwinMind needs audio capture permission to record system audio (the other side of meetings) for transcription."
+      "NSAudioCaptureUsageDescription": "TwinMind needs audio capture permission to record system audio (the other side of meetings) for transcription.",
+      "CFBundleURLTypes": [
+        {
+          "CFBundleURLName": "TwinMind Sign-In Callback",
+          "CFBundleURLSchemes": ["twinmind"]
+        }
+      ]
     },
     "target": [
       { "target": "dmg", "arch": ["x64", "arm64"] },

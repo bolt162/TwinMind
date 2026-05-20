@@ -70,6 +70,74 @@ import { resolveAudioteeBinaryPath } from '@platform/audioteeBinaryPath';
 // Isolate V2 userData from any V1 install. See HANDOFF / commit notes for why.
 app.setPath('userData', path.join(app.getPath('appData'), 'TwinMind-V2'));
 
+// ─── twinmind:// custom protocol (sign-in callback) ─────────────────────────
+//
+// Sign-in flow: the system browser opens the TwinMind webapp; the webapp
+// completes Google OAuth and redirects to `twinmind://auth/callback?token=…`.
+// macOS LaunchServices routes that URL back to whichever app most recently
+// registered for the `twinmind` scheme (V1 also uses it — last-writer wins,
+// which the user has accepted).
+//
+// `setAsDefaultProtocolClient` MUST be called synchronously at module load,
+// before `app.whenReady()` resolves, otherwise a click on the redirect URL
+// during cold-launch can miss us. The `defaultApp` branch handles `npm run
+// dev`, where Electron is launched with the entry script path in argv —
+// we have to pass the resolved entry-script path so the OS knows how to
+// re-launch the dev binary.
+const AUTH_SCHEME = 'twinmind';
+if (process.defaultApp) {
+  if (process.argv.length >= 2 && typeof process.argv[1] === 'string') {
+    app.setAsDefaultProtocolClient(AUTH_SCHEME, process.execPath, [
+      path.resolve(process.argv[1]),
+    ]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(AUTH_SCHEME);
+}
+
+// Single-instance lock. Without it, clicking a `twinmind://` link while the
+// app is already running spawns a SECOND Electron process, which then has
+// its own (empty) auth state and confused windows. With the lock, the OS
+// routes the new launch's URL through `second-instance` on the existing
+// process and the duplicate exits.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
+// Buffer for URLs that arrive BEFORE shell is built (cold-launch via deep
+// link). Drained inside `app.whenReady()` once `shell.authProvider` exists.
+let pendingAuthCallbackUrl: string | null = null;
+
+function routeAuthCallback(url: string): void {
+  if (!url.startsWith(`${AUTH_SCHEME}://`)) return;
+  if (!shell) {
+    pendingAuthCallbackUrl = url;
+    return;
+  }
+  shell.authProvider.deliverAuthCallback(url);
+}
+
+// macOS routes deep links through this event for both cold-launch (queued
+// before whenReady) and warm dispatch (existing instance).
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  routeAuthCallback(url);
+});
+
+// Windows/Linux: the URL arrives as an argv entry on the SECOND instance,
+// which the OS routes through this event on the primary. macOS includes
+// `additionalData` for some cases too; we keep it cross-platform by
+// scanning argv. Bring the main window forward so the user sees the result.
+app.on('second-instance', (_event, argv) => {
+  const url = argv.find((a) => typeof a === 'string' && a.startsWith(`${AUTH_SCHEME}://`));
+  if (url) routeAuthCallback(url);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    showMainWindowOnCurrentSpace(mainWindow);
+    mainWindow.focus();
+  }
+});
+
 // ─── Module-level state ─────────────────────────────────────────────────────
 
 let shell: Shell | null = null;
@@ -1367,6 +1435,14 @@ app.whenReady().then(async () => {
   // 2. Build the shell.
   shell = buildShell({ audioLink, platform, appVersion: app.getVersion() });
   shell.platform.deviceMonitor.start();
+
+  // If a twinmind:// link was clicked before the shell finished initializing
+  // (cold-launch via deep link), drain it now so the in-flight signIn picks
+  // it up. A no-op if signIn() isn't waiting — the provider just logs it.
+  if (pendingAuthCallbackUrl) {
+    shell.authProvider.deliverAuthCallback(pendingAuthCallbackUrl);
+    pendingAuthCallbackUrl = null;
+  }
 
   // 3. IPC bridge.
   bridge = new IpcBridgeMain(ipcMain, shell.logger);
