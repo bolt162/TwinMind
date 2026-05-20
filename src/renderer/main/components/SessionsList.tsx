@@ -109,14 +109,14 @@ function SessionRow({
       <button
         type="button"
         onClick={onOpen}
-        className="flex flex-1 items-center gap-3 text-left"
+        className="flex min-w-0 flex-1 items-center gap-3 text-left"
       >
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
           <Icon className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-medium text-zinc-100">
+            <span className="min-w-0 truncate text-sm font-medium text-zinc-100">
               {session.title ?? `Untitled ${session.mode}`}
             </span>
             {isLive && (
