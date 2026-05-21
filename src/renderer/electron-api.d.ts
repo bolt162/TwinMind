@@ -68,6 +68,9 @@ declare global {
         setMouseIgnore(
           input: RequestPayloads['hud.setMouseIgnore']['input'],
         ): Promise<Record<string, never>>;
+        setVisualState(
+          input: RequestPayloads['hud.setVisualState']['input'],
+        ): Promise<Record<string, never>>;
       };
       readonly main: {
         showSessionsTab(): Promise<Record<string, never>>;
@@ -139,6 +142,9 @@ declare global {
         ): () => void;
         summaryStateChanged(
           cb: (e: PushPayloads['summary_state_changed']) => void,
+        ): () => void;
+        hudEdgeAnchor(
+          cb: (e: PushPayloads['hud_edge_anchor']) => void,
         ): () => void;
       };
     };

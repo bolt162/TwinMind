@@ -57,3 +57,40 @@ exports.default = async function notarizing(context) {
 
   console.log(`[notarize] ${appName}.app accepted by Apple — stapling ticket.`);
 };
+
+// electron-builder also exposes an `afterAllArtifactBuild` hook that runs once
+// after every artifact (DMG, zip, blockmap) is produced. We use it to notarize
+// and staple the DMG itself — notarizing the .app alone is not enough, because
+// Gatekeeper evaluates the DMG signature first when a user double-clicks a
+// freshly-downloaded `.dmg`. Without a notarized DMG, users get the "cannot be
+// opened" dialog and have to detour through System Settings > Privacy &
+// Security, even though the inner .app is notarized.
+exports.afterAllArtifactBuild = async function notarizeDmgs(buildResult) {
+  if (process.platform !== 'darwin') return [];
+
+  const { APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID } = process.env;
+  if (!APPLE_ID || !APPLE_APP_SPECIFIC_PASSWORD || !APPLE_TEAM_ID) return [];
+
+  const dmgs = (buildResult.artifactPaths || []).filter((p) => p.endsWith('.dmg'));
+  if (dmgs.length === 0) return [];
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { notarize } = require('@electron/notarize');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { execFileSync } = require('node:child_process');
+
+  for (const dmgPath of dmgs) {
+    console.log(`[notarize-dmg] Submitting ${path.basename(dmgPath)} to Apple…`);
+    await notarize({
+      tool: 'notarytool',
+      appPath: dmgPath,
+      appleId: APPLE_ID,
+      appleIdPassword: APPLE_APP_SPECIFIC_PASSWORD,
+      teamId: APPLE_TEAM_ID,
+    });
+    console.log(`[notarize-dmg] Stapling ticket to ${path.basename(dmgPath)}.`);
+    execFileSync('xcrun', ['stapler', 'staple', dmgPath], { stdio: 'inherit' });
+  }
+
+  return [];
+};

@@ -212,6 +212,10 @@ export const PushSchemas = {
   [PUSH.MIC_DEVICE_LOST]: micDeviceLost,
   [PUSH.AUTH_STATE_CHANGED]: authStateChanged,
   [PUSH.SUMMARY_STATE_CHANGED]: summaryStateChanged,
+  [PUSH.HUD_EDGE_ANCHOR]: z.object({
+    x: z.enum(['left', 'right', 'center']),
+    y: z.enum(['top', 'bottom', 'center']),
+  }),
 } as const;
 
 // ─── REQUEST schemas (input + output per channel) ────────────────────────────
@@ -345,6 +349,18 @@ const hudDragMoveByInput = z.object({
 
 const hudSetMouseIgnoreInput = z.object({ ignore: z.boolean() });
 
+const hudSetVisualStateInput = z.object({
+  visual: z.enum([
+    'idle',
+    'hoverIdle',
+    'busy',
+    'recording',
+    'processing',
+    'failed',
+    'disconnected',
+  ]),
+});
+
 /** Map of request channel → { input, output } schemas. */
 export const RequestSchemas = {
   [REQUEST.REC_START_DICTATION]: { input: empty, output: empty },
@@ -386,6 +402,7 @@ export const RequestSchemas = {
     output: recordingListInputDevicesOutput,
   },
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: hudSetMouseIgnoreInput, output: empty },
+  [REQUEST.HUD_SET_VISUAL_STATE]: { input: hudSetVisualStateInput, output: empty },
   [REQUEST.REC_RESUME_FROM_DEVICE_LOSS]: { input: recordingResumeFromDeviceLossInput, output: empty },
   [REQUEST.AUTH_GET_STATE]: { input: empty, output: authStateChanged },
   [REQUEST.AUTH_SIGN_IN]: { input: empty, output: authSignInOutput },

@@ -29,6 +29,7 @@ export const PUSH = {
   MIC_DEVICE_LOST: 'mic_device_lost',
   AUTH_STATE_CHANGED: 'auth_state_changed',
   SUMMARY_STATE_CHANGED: 'summary_state_changed',
+  HUD_EDGE_ANCHOR: 'hud_edge_anchor',
 } as const;
 export type PushChannel = (typeof PUSH)[keyof typeof PUSH];
 
@@ -63,6 +64,7 @@ export const REQUEST = {
   HOTKEY_CAPTURE_END: 'hotkey.captureEnd',
   RECORDING_LIST_INPUT_DEVICES: 'recording.listInputDevices',
   HUD_SET_MOUSE_IGNORE: 'hud.setMouseIgnore',
+  HUD_SET_VISUAL_STATE: 'hud.setVisualState',
   REC_RESUME_FROM_DEVICE_LOSS: 'recording.resumeFromDeviceLoss',
   AUTH_GET_STATE: 'auth.getState',
   AUTH_SIGN_IN: 'auth.signIn',
@@ -426,6 +428,40 @@ export interface HudSetMouseIgnoreInput {
 }
 
 /**
+ * Pill visual state — the renderer pushes this to main on every transition
+ * so main can decide whether to shift the HUD window to keep the expanded
+ * visible bounds inside workArea. Matches the renderer's PillVisual type.
+ * The state→bounds table lives in main (FloatingHudWindow).
+ */
+export type HudPillVisual =
+  | 'idle'
+  | 'hoverIdle'
+  | 'busy'
+  | 'recording'
+  | 'processing'
+  | 'failed'
+  | 'disconnected';
+
+export interface HudSetVisualStateInput {
+  readonly visual: HudPillVisual;
+}
+
+/**
+ * Pushed by main whenever the HUD's idle pill is near an edge of the
+ * current display's workArea. Renderer uses this to flip the hover-group
+ * expansion direction (e.g., when pill is hugging the right edge, the
+ * Take-notes / Home buttons should appear LEFT of the pill instead of
+ * right, so they don't render past the screen edge).
+ *
+ * Both axes are emitted together so the renderer doesn't need to track
+ * partial state across pushes.
+ */
+export interface HudEdgeAnchor {
+  readonly x: 'left' | 'right' | 'center';
+  readonly y: 'top' | 'bottom' | 'center';
+}
+
+/**
  * Snapshot of auth state returned by AUTH_GET_STATE. Same shape as the
  * AUTH_STATE_CHANGED push — the renderer calls this once on mount to seed
  * before subscribing, then relies on pushes for further updates.
@@ -508,6 +544,7 @@ export interface PushPayloads {
   [PUSH.MIC_DEVICE_LOST]: MicDeviceLost;
   [PUSH.AUTH_STATE_CHANGED]: AuthStateChanged;
   [PUSH.SUMMARY_STATE_CHANGED]: SummaryStateChanged;
+  [PUSH.HUD_EDGE_ANCHOR]: HudEdgeAnchor;
 }
 
 /** Request channels: channel name → { input, output } pair. */
@@ -577,6 +614,7 @@ export interface RequestPayloads {
     output: RecordingListInputDevicesOutput;
   };
   [REQUEST.HUD_SET_MOUSE_IGNORE]: { input: HudSetMouseIgnoreInput; output: Empty };
+  [REQUEST.HUD_SET_VISUAL_STATE]: { input: HudSetVisualStateInput; output: Empty };
   [REQUEST.REC_RESUME_FROM_DEVICE_LOSS]: {
     input: { readonly sessionId: string; readonly deviceId: string | null };
     output: Empty;

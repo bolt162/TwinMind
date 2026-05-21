@@ -67,6 +67,15 @@ export function HudApp() {
   const [hovered, setHovered] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [deviceLost, setDeviceLost] = useState<DeviceLostState | null>(null);
+  /**
+   * Edge anchor pushed by main when the pill is near a workArea edge.
+   * Used to flip the hover-group expansion direction so Take notes + Home
+   * appear on the side AWAY from the edge (toward the screen interior).
+   */
+  const [edgeAnchor, setEdgeAnchor] = useState<{
+    x: 'left' | 'right' | 'center';
+    y: 'top' | 'bottom' | 'center';
+  }>({ x: 'center', y: 'center' });
   // Configured hotkey, shown as a chip inside the hover-idle pill. Globe
   // (Fn) is the always-on default; settings.hotkeys.primary is the optional
   // extra. We display the primary if set, otherwise "Fn".
@@ -194,12 +203,18 @@ export function HudApp() {
     const unsubTx = window.electronAPI.on.transcriptionUiState((e) => {
       setTxState(e);
     });
+    // Edge-anchor pushes drive the hover-group expansion direction. Main
+    // recomputes after every drag move + state change.
+    const unsubAnchor = window.electronAPI.on.hudEdgeAnchor((e) => {
+      setEdgeAnchor(e);
+    });
     return () => {
       unsubRec();
       unsubTx();
       unsubHotkey();
       unsubLost();
       unsubAuth();
+      unsubAnchor();
     };
   }, []);
 
@@ -294,6 +309,17 @@ export function HudApp() {
               : 'idle';
   const expanded = visual !== 'idle';
 
+  // Notify main of the current visual state. Main uses this to decide
+  // whether to shift the HUD window so larger states (banner: 400 × 100)
+  // fit inside the workArea even when the user dragged the idle pill near
+  // an edge. State transitions that fit at the anchor are no-ops in main;
+  // only the banner states actually move the window.
+  useEffect(() => {
+    void window.electronAPI.hud.setVisualState({ visual }).catch(() => {
+      /* HUD detached / IPC down — harmless */
+    });
+  }, [visual]);
+
   // When the visual changes, the pill's bounds typically change too — but
   // a stationary cursor doesn't fire mousemove from that layout shift, so
   // the hit-test would otherwise stay stale. Re-check after layout settles.
@@ -363,7 +389,19 @@ export function HudApp() {
   };
 
   return (
-    <div className="flex h-full w-full items-center justify-center gap-2">
+    <div
+      className={[
+        'flex h-full w-full items-center justify-center gap-2',
+        // When the pill is hugging the RIGHT edge of workArea, the default
+        // flex-row puts Take notes + Home buttons RIGHT of the pill — past
+        // the edge. Flip to flex-row-reverse so they appear LEFT instead,
+        // keeping the whole group inside the workArea. The pill stays at
+        // its dragged anchor; only the hover-additions flip sides.
+        edgeAnchor.x === 'right' ? 'flex-row-reverse' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
       <button
         type="button"
         onClick={onPillClick}

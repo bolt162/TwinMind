@@ -22,6 +22,7 @@
     { "from": "resources/tray", "to": "tray", "filter": ["**/*.png"] }
   ],
   "afterSign": "scripts/notarize.js",
+  "afterAllArtifactBuild": "scripts/notarize.js",
   "mac": {
     "category": "public.app-category.productivity",
     "hardenedRuntime": true,

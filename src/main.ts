@@ -741,6 +741,10 @@ function wireIpc(b: IpcBridgeMain): void {
     hud?.setMouseIgnore(ignore);
     return {};
   });
+  b.handle(REQUEST.HUD_SET_VISUAL_STATE, ({ visual }) => {
+    hud?.setVisualState(visual);
+    return {};
+  });
   b.handle(REQUEST.DATA_DELETE_EVERYTHING, async () => {
     const c = requireComposed();
     c.logger.warn('data.deleteEverything invoked — full nuke for this user');
@@ -1597,6 +1601,17 @@ app.whenReady().then(async () => {
     process.env.NODE_ENV === 'development' ? HUD_DEV_URL : undefined,
     onboardingComplete,
   );
+  // Wire the edge-anchor pusher so the HUD can tell the renderer to flip
+  // the hover-group expansion direction when the pill hugs a screen edge.
+  // Push only to the HUD's own webContents — main window doesn't care.
+  hud.setEdgeAnchorPusher((anchor) => {
+    if (!bridge || !hud) return;
+    try {
+      bridge.broadcast(hud.webContents(), PUSH.HUD_EDGE_ANCHOR, anchor);
+    } catch {
+      /* HUD already torn down */
+    }
+  });
   mainWindow = createMainWindow();
   tray = new TrayManager({ onOpenHome: () => openHome(), logger: shell.logger });
   tray.init();

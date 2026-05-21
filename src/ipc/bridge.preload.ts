@@ -100,6 +100,8 @@ const electronAPI = {
     endDrag: () => invoke(REQUEST.HUD_END_DRAG, {}),
     setMouseIgnore: (input: RequestPayloads[typeof REQUEST.HUD_SET_MOUSE_IGNORE]['input']) =>
       invoke(REQUEST.HUD_SET_MOUSE_IGNORE, input),
+    setVisualState: (input: RequestPayloads[typeof REQUEST.HUD_SET_VISUAL_STATE]['input']) =>
+      invoke(REQUEST.HUD_SET_VISUAL_STATE, input),
   },
   main: {
     showSessionsTab: () => invoke(REQUEST.MAIN_SHOW_SESSIONS_TAB, {}),
@@ -160,6 +162,8 @@ const electronAPI = {
       subscribe(PUSH.AUTH_STATE_CHANGED, cb),
     summaryStateChanged: (cb: (e: PushPayloads[typeof PUSH.SUMMARY_STATE_CHANGED]) => void) =>
       subscribe(PUSH.SUMMARY_STATE_CHANGED, cb),
+    hudEdgeAnchor: (cb: (e: PushPayloads[typeof PUSH.HUD_EDGE_ANCHOR]) => void) =>
+      subscribe(PUSH.HUD_EDGE_ANCHOR, cb),
   },
 } as const;
 
