@@ -408,7 +408,15 @@ export function HudApp() {
         }}
       >
         {visual === 'idle' && (
-          <span className="block h-1.5 w-1.5 rounded-full bg-white/70" />
+          // Three vertical bars (longer middle) reading as a small EQ /
+          // mic-active glyph. `mx-auto` centers the group inside the pill
+          // — the pill itself uses `justify-start` so we'd otherwise see
+          // the dot pinned to the left edge.
+          <span className="mx-auto flex items-center gap-[2px]" aria-hidden>
+            <span className="block h-2 w-0.5 rounded-sm bg-white/70" />
+            <span className="block h-3 w-0.5 rounded-sm bg-white/70" />
+            <span className="block h-2 w-0.5 rounded-sm bg-white/70" />
+          </span>
         )}
         {visual === 'hoverIdle' && (
           // Fade the contents in AFTER the pill's 150ms width transition has
