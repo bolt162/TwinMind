@@ -288,12 +288,6 @@ function InputDeviceField({
   return (
     <label className="block space-y-1">
       <span className="text-sm">Input device</span>
-      <div className="rounded-md border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-200/90">
-        For best transcription quality, use your Mac's built-in microphone.
-        TwinMind picks it by default whenever it's available — external
-        mics (Bluetooth headsets in particular) can introduce dropouts and
-        a brief profile-switch delay at the start of recording.
-      </div>
       <div className="flex items-center gap-2">
         <select
           value={value ?? ''}
