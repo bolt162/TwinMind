@@ -165,6 +165,13 @@ const authSignInOutput = z.object({
   message: z.string().max(4096).optional(),
 });
 
+// Main refuses sign-out while a recording is in flight; the renderer's
+// AccountCard reads `error: 'recording_active'` and pops an in-app modal.
+const authSignOutOutput = z.object({
+  ok: z.boolean(),
+  error: z.literal('recording_active').optional(),
+});
+
 const authListUsersOutput = z.object({
   users: z
     .array(
@@ -374,7 +381,7 @@ export const RequestSchemas = {
   [REQUEST.REC_RESUME_FROM_DEVICE_LOSS]: { input: recordingResumeFromDeviceLossInput, output: empty },
   [REQUEST.AUTH_GET_STATE]: { input: empty, output: authStateChanged },
   [REQUEST.AUTH_SIGN_IN]: { input: empty, output: authSignInOutput },
-  [REQUEST.AUTH_SIGN_OUT]: { input: empty, output: empty },
+  [REQUEST.AUTH_SIGN_OUT]: { input: empty, output: authSignOutOutput },
   [REQUEST.AUTH_LIST_USERS]: { input: empty, output: authListUsersOutput },
   [REQUEST.AUTH_CANCEL_SIGN_IN]: { input: empty, output: empty },
   [REQUEST.STORAGE_IMPORT_LEGACY]: { input: empty, output: storageImportLegacyOutput },

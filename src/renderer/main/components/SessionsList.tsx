@@ -126,7 +126,7 @@ function SessionRow({
             )}
           </div>
           <div className="truncate text-xs text-zinc-500">
-            {startedAt.toLocaleString()} · {session.mode}
+            {startedAt.toLocaleString()}
             {session.status === 'paused_by_sleep' && ' · paused by sleep'}
           </div>
         </div>
