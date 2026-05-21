@@ -1,10 +1,16 @@
 /**
  * HomePage — the default landing tab.
  *
- * Replaced the old RecordingDashboard's manual start/stop buttons. Recording
- * itself happens via the hotkey or the floating HUD; this page just orients
- * the user with a time-of-day greeting, instructions for dictation +
- * meeting, and a focusable text area they can use to test auto-paste.
+ * Replaced the old RecordingDashboard's manual start/stop buttons. Two
+ * entry points to recording, each tied to its own affordance:
+ *   - Dictation: the configurable hotkey (hold-to-talk + double-tap-for-
+ *     hands-free).
+ *   - Meeting: the HUD's "Take notes" button — the only meeting entry
+ *     point (the hotkey is dictation-only).
+ *
+ * This page just orients the user with a time-of-day greeting, the two
+ * instruction lists, and a focusable text area they can use to test
+ * auto-paste.
  *
  * Layout is sized to fit a typical-height window without scrolling: a soft
  * greeting up top, the dictation steps + a compact "Try it" textarea, then
@@ -14,7 +20,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Radio, Sparkles } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 export function HomePage() {
@@ -39,6 +45,10 @@ export function HomePage() {
             Press and hold <Kbd>{hotkeyLabel}</Kbd>
           </>,
           <>Speak, then release to auto-paste the transcription where your cursor is</>,
+          <>
+            For hands-free dictation, double-tap <Kbd>{hotkeyLabel}</Kbd> to start; single-tap{' '}
+            <Kbd>{hotkeyLabel}</Kbd> to stop
+          </>,
         ]}
       />
 
@@ -48,9 +58,13 @@ export function HomePage() {
         title="Meeting"
         steps={[
           <>
-            Double-tap <Kbd>{hotkeyLabel}</Kbd> to start, single-tap to stop
+            Hover the floating microphone, then click the{' '}
+            <InlineHudButton>
+              <Radio className="h-3 w-3 text-white" />
+            </InlineHudButton>{' '}
+            button to start
           </>,
-          <>Or click the floating microphone button to start, click again to stop</>,
+          <>Click it again to stop</>,
         ]}
       />
 
@@ -166,5 +180,19 @@ function Kbd({ children }: { children: string }) {
     <kbd className="mx-0.5 inline-flex items-center rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200">
       {children}
     </kbd>
+  );
+}
+
+/**
+ * Mini visual of the HUD's circular dark-glass button — matches the actual
+ * "Take notes" button so the user can recognize it in the HUD when reading
+ * the meeting instructions. Smaller scale (h-5 w-5) since it sits inline
+ * with body text.
+ */
+function InlineHudButton({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="mx-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/40 bg-black/55 align-middle">
+      {children}
+    </span>
   );
 }
