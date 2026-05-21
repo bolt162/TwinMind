@@ -41,7 +41,13 @@ export function SessionDetail({ sessionId, onClose }: Props) {
       )}
 
       {data && <SessionHeader data={data} />}
-      {data && <TranscriptList items={data.transcripts} mode={data.mode} />}
+      {data && (
+        <TranscriptList
+          items={data.transcripts}
+          mode={data.mode}
+          sessionStartedAt={data.startedAt}
+        />
+      )}
     </div>
   );
 }
@@ -261,6 +267,7 @@ function EditableTitle({
 function TranscriptList({
   items,
   mode,
+  sessionStartedAt,
 }: {
   items: ReadonlyArray<{
     chunkId: string;
@@ -268,9 +275,9 @@ function TranscriptList({
     endMs: number;
     overlapPrefixMs: number;
     text: string;
-    clockTimeMs: number | null;
   }>;
   mode: 'dictation' | 'meeting';
+  sessionStartedAt: number;
 }) {
   if (items.length === 0) {
     return (
@@ -282,22 +289,22 @@ function TranscriptList({
   return (
     <ol className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
       {items.map((t) => {
-        // Display the *new-content* range, hiding the 2 s overlap prepend so
-        // adjacent chunks render as a clean 0:00–0:30 / 0:30–1:00 sequence.
-        // The audio-process pads chunks with silence at close so endMs lands
-        // on the exact target millisecond — no further client-side workaround
-        // needed for the floor-rounding flicker.
-        const displayStart = t.startMs + t.overlapPrefixMs;
-        // Meetings: show the wall-clock time at which the chunk was sent
-        // to /choose (e.g. "14:02") instead of the relative range. Falls
-        // back to relative when clockTimeMs is null (pre-migration rows,
-        // VAD-skipped chunks, mock provider).
-        const clockLabel =
-          mode === 'meeting' && t.clockTimeMs !== null ? formatClockHHMM(t.clockTimeMs) : null;
+        // Display the *new-content* start, hiding the 2 s overlap prepend so
+        // adjacent chunks render contiguously (0:00→0:30→1:00 …). For
+        // meetings we render the wall-clock equivalent — derived from
+        // `session.started_at + chunk.start_ms + overlap` so EVERY chunk
+        // gets a consistent HH:MM regardless of when it was transcribed
+        // (pre-migration row, VAD-skipped, normal — all the same). For
+        // dictation we keep the relative MM:SS – MM:SS range.
+        const newContentStartMs = t.startMs + t.overlapPrefixMs;
+        const label =
+          mode === 'meeting'
+            ? formatClockHHMM(sessionStartedAt + newContentStartMs)
+            : `${formatTimestamp(newContentStartMs)} – ${formatTimestamp(t.endMs)}`;
         return (
           <li key={t.chunkId} className="flex gap-3">
             <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
-              {clockLabel ?? `${formatTimestamp(displayStart)} – ${formatTimestamp(t.endMs)}`}
+              {label}
             </span>
             <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
           </li>
