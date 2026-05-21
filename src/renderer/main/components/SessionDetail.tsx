@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ExternalLink, Loader2, Mic, Radio, Sparkles } from 'lucide-react';
+import { Check, ChevronLeft, Copy, ExternalLink, Loader2, Mic, Radio, Sparkles } from 'lucide-react';
 import { useSession } from '../hooks/useSession';
 
 interface Props {
@@ -287,30 +287,106 @@ function TranscriptList({
     );
   }
   return (
-    <ol className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
-      {items.map((t) => {
-        // Display the *new-content* start, hiding the 2 s overlap prepend so
-        // adjacent chunks render contiguously (0:00→0:30→1:00 …). For
-        // meetings we render the wall-clock equivalent — derived from
-        // `session.started_at + chunk.start_ms + overlap` so EVERY chunk
-        // gets a consistent HH:MM regardless of when it was transcribed
-        // (pre-migration row, VAD-skipped, normal — all the same). For
-        // dictation we keep the relative MM:SS – MM:SS range.
-        const newContentStartMs = t.startMs + t.overlapPrefixMs;
-        const label =
-          mode === 'meeting'
-            ? formatClockHHMM(sessionStartedAt + newContentStartMs)
-            : `${formatTimestamp(newContentStartMs)} – ${formatTimestamp(t.endMs)}`;
-        return (
-          <li key={t.chunkId} className="flex gap-3">
-            <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
-              {label}
-            </span>
-            <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
-          </li>
-        );
-      })}
-    </ol>
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+      {mode === 'meeting' && (
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+            Transcript
+          </span>
+          <CopyMeetingTranscriptButton items={items} sessionStartedAt={sessionStartedAt} />
+        </div>
+      )}
+      <ol className="space-y-2">
+        {items.map((t) => {
+          // Display the *new-content* start, hiding the 2 s overlap prepend so
+          // adjacent chunks render contiguously (0:00→0:30→1:00 …). For
+          // meetings we render the wall-clock equivalent — derived from
+          // `session.started_at + chunk.start_ms + overlap` so EVERY chunk
+          // gets a consistent HH:MM regardless of when it was transcribed
+          // (pre-migration row, VAD-skipped, normal — all the same). For
+          // dictation we keep the relative MM:SS – MM:SS range.
+          const newContentStartMs = t.startMs + t.overlapPrefixMs;
+          const label =
+            mode === 'meeting'
+              ? formatClockHHMM(sessionStartedAt + newContentStartMs)
+              : `${formatTimestamp(newContentStartMs)} – ${formatTimestamp(t.endMs)}`;
+          return (
+            <li key={t.chunkId} className="flex gap-3">
+              <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
+                {label}
+              </span>
+              <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+/**
+ * Copy the whole meeting transcript to the clipboard, formatted as
+ * `[HH:MM] chunk-text\n\n[HH:MM] chunk-text…`. Uses the same HH:MM
+ * derivation as the inline timestamps so copied times match what the
+ * user sees on screen exactly. Empty / VAD-skipped chunks are filtered
+ * out so the output isn't littered with `[HH:MM]` lines and no text.
+ *
+ * Visual: Copy icon → Check icon for 1.5 s after success, then back to
+ * Copy. Disabled when no chunks have any text. Matches the dictation
+ * tile's copy affordance for visual consistency.
+ */
+function CopyMeetingTranscriptButton({
+  items,
+  sessionStartedAt,
+}: {
+  items: ReadonlyArray<{
+    startMs: number;
+    overlapPrefixMs: number;
+    text: string;
+  }>;
+  sessionStartedAt: number;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const text = items
+    .filter((t) => t.text.trim().length > 0)
+    .map((t) => {
+      const hhmm = formatClockHHMM(sessionStartedAt + t.startMs + t.overlapPrefixMs);
+      return `[${hhmm}] ${t.text.trim()}`;
+    })
+    .join('\n\n');
+  const hasText = text.length > 0;
+
+  const handleCopy = async () => {
+    if (!hasText) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      // Brief visual confirmation; reset after a beat so the user can copy
+      // again without reloading.
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard write blocked — surface nothing; the user will notice the
+         absence of the check icon. */
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      disabled={!hasText}
+      className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[11px] text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-zinc-800/50"
+      aria-label={copied ? 'Copied' : 'Copy transcript'}
+      title={copied ? 'Copied' : 'Copy transcript'}
+    >
+      {copied ? (
+        <Check className="h-3 w-3 text-emerald-400" />
+      ) : (
+        <Copy className="h-3 w-3" />
+      )}
+      <span>{copied ? 'Copied' : 'Copy'}</span>
+    </button>
   );
 }
 

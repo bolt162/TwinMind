@@ -292,7 +292,14 @@ function InputDeviceField({
         <select
           value={value ?? ''}
           onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
-          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-sm"
+          // Fixed width + truncate keeps the closed dropdown from auto-resizing
+          // to fit the current selection (short names shrink it, long names
+          // overflow the row). Chromium honors `truncate` on the closed <select>
+          // so long device names render with `…`. The OPEN dropdown list is
+          // rendered by the native widget — CSS doesn't apply there, so it
+          // shows full names; acceptable trade-off for not building a custom
+          // dropdown.
+          className="w-72 truncate rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-sm"
         >
           <option value="">{autoOptionLabel}</option>
           {builtIn.length > 0 && (
