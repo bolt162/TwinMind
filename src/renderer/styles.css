@@ -9,6 +9,15 @@ body,
   margin: 0;
   padding: 0;
   background: transparent;
+  /* Fill the Electron window vertically. Without an explicit height,
+     html/body/#root collapse to their content height — which makes
+     `h-full` inside the React tree resolve to the content height
+     (e.g. 32px) instead of the window height (124px for the HUD).
+     That broke `items-center` positioning of the pill and caused the
+     "Take notes" tooltip to render outside the window's drawing area.
+     The main window also wants this so the renderer can use `h-full`
+     freely. */
+  height: 100%;
   /* Prevent the renderer process from showing a horizontal scrollbar when
      the layout sits at exactly window width. */
   overflow: hidden;
