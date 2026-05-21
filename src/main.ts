@@ -1209,18 +1209,26 @@ async function swapComposedTo(userId: string | null): Promise<void> {
     // Post-recovery: any meeting that ended with transcripts but no summary
     // (crash mid-summary, or crash before summary ever fired) auto-fires
     // now so the user doesn't have to click Generate summary manually.
-    // fireSummary is idempotent and the upload queue's onSessionProcessed
-    // path covers the remaining case (orphan chunks that recovered as
-    // `captured` and need to transcribe first — summary fires automatically
-    // when their state reaches `completed`).
+    // fireSummary is idempotent. The upload queue's onSessionProcessed
+    // hook covers the case where orphan chunks need to transcribe first —
+    // summary fires automatically when their state reaches `completed`.
+    //
+    // Run sequentially with `await` (not `void` / parallel) — if recovery
+    // finds 10+ candidates, a parallel burst would slam the summary
+    // endpoint and starve the user's main-thread network bandwidth on
+    // startup. Each fireSummary is fast when it's a no-op (the guards
+    // short-circuit) and slow only when a real network call happens,
+    // so serial is the right pace.
     const candidates = composed.jobStore.findMeetingsNeedingSummary();
-    for (const session of candidates) {
-      void fireSummary(session.id);
-    }
     if (candidates.length > 0) {
-      composed.logger.info('post-recovery auto-summary fired', {
+      composed.logger.info('post-recovery auto-summary queued', {
         count: candidates.length,
       });
+      void (async () => {
+        for (const session of candidates) {
+          await fireSummary(session.id);
+        }
+      })();
     }
   }
 }
@@ -1293,19 +1301,43 @@ function broadcastSummaryState(
  */
 async function fireSummary(sessionId: string): Promise<void> {
   if (!composed || !shell) return;
+  const logger = shell.logger;
   const session = composed.jobStore.getSession(sessionId);
-  if (!session) return;
-  if (session.mode !== 'meeting') return;
-  if (session.ended_at == null) return;
-  if (session.summary_status === 'completed' || session.summary_status === 'pending') {
+  if (!session) {
+    logger.info('summary skipped', { sessionId, reason: 'session_missing' });
     return;
   }
-  // Skip if zero chunks were ever transcribed successfully — backend has
-  // nothing to summarize. Leave summary_status NULL so the UI shows nothing.
-  const hasAnyText = composed.jobStore
-    .listChunksForSession(sessionId)
-    .some((c) => c.state === 'completed');
-  if (!hasAnyText) return;
+  if (session.mode !== 'meeting') {
+    logger.info('summary skipped', { sessionId, reason: 'not_meeting' });
+    return;
+  }
+  if (session.ended_at == null) {
+    logger.info('summary skipped', { sessionId, reason: 'not_ended' });
+    return;
+  }
+  if (session.summary_status === 'completed') {
+    logger.info('summary skipped', { sessionId, reason: 'already_completed' });
+    return;
+  }
+  if (session.summary_status === 'pending') {
+    logger.info('summary skipped', { sessionId, reason: 'already_pending' });
+    return;
+  }
+  // Defer when chunks are still uploading — summarizing now would give a
+  // partial transcript. The onSessionProcessed hook will re-fire summary
+  // once the last chunk reaches a terminal state.
+  if (composed.jobStore.sessionHasInFlightChunks(sessionId)) {
+    logger.info('summary skipped', { sessionId, reason: 'chunks_in_flight' });
+    return;
+  }
+  // Don't fire when there's no transcript text. Distinct from "has any
+  // completed chunk" — VAD-skipped chunks reach state=completed with
+  // text=''. Without this check, an all-silent meeting POSTs an empty
+  // body and the backend LLM call 500s.
+  if (!composed.jobStore.sessionHasTranscribedText(sessionId)) {
+    logger.info('summary skipped', { sessionId, reason: 'no_transcript_text' });
+    return;
+  }
 
   composed.jobStore.setSummaryPending(sessionId, Date.now());
   broadcastSummaryState(sessionId, 'pending');

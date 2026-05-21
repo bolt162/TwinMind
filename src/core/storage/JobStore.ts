@@ -245,21 +245,52 @@ export class JobStore {
   }
 
   /**
-   * Recovery sweep — flips any leftover `summary_status='pending'` row (from
-   * a previous launch that crashed mid-summary) back to 'failed' so the UI
-   * shows the manual "Generate summary" retry button. Returns the number of
-   * rows touched, for telemetry.
+   * Recovery sweep — clears any leftover `summary_status='pending'` row
+   * (from a previous launch that crashed mid-summary) back to NULL, AND
+   * wipes `summary_requested_at`. We flip to NULL (not 'failed') so the
+   * post-recovery auto-fire loop will pick the session up and re-attempt
+   * the call. The backend dedupes by meeting_id, so a re-fire is harmless
+   * if the previous attempt actually succeeded server-side. Returns the
+   * number of rows touched, for telemetry.
    */
   recoverStaleSummaryPending(): number {
     return this.stmts.recoverStaleSummaryPending.run().changes;
   }
 
   /**
-   * Meeting sessions that should auto-fire a summary on next launch: ended,
-   * not currently summarizing, and have at least one transcript-bearing
-   * chunk. Used by the post-recovery sweep in main — if the app crashed
-   * after transcripts landed but before (or during) the summary call, the
-   * user shouldn't have to click "Generate summary" manually.
+   * True iff the session has at least one transcript row with non-empty
+   * text. Distinct from "has any completed chunk" because VAD-skipped /
+   * ASR-empty chunks are completed with `text=''`. Used to gate the
+   * summary call — firing /summary against a session with zero text just
+   * produces a 500 from the backend's LLM call.
+   */
+  sessionHasTranscribedText(sessionId: string): boolean {
+    return (
+      (this.stmts.sessionHasTranscribedText.get({ session_id: sessionId }) as { n: number }).n > 0
+    );
+  }
+
+  /**
+   * True iff the session has any chunks in non-terminal states
+   * (captured / uploading / failed_retry). We use this to defer the
+   * summary call when transcripts are still landing — otherwise we'd
+   * summarize a partial transcript on the recovery path. The
+   * onSessionProcessed → fireSummary auto-trigger will re-fire once the
+   * last chunk reaches a terminal state.
+   */
+  sessionHasInFlightChunks(sessionId: string): boolean {
+    return (
+      (this.stmts.sessionHasInFlightChunks.get({ session_id: sessionId }) as { n: number }).n > 0
+    );
+  }
+
+  /**
+   * Meeting sessions that should auto-fire a summary on next launch:
+   * ended, never attempted (`summary_status IS NULL`), and have at
+   * least one transcript-bearing chunk. We deliberately exclude
+   * `summary_status='failed'` from the auto-retry — a persistent
+   * backend failure (e.g., LLM outage) would otherwise hammer the
+   * server every launch. The user retries manually via SESSION_RETRY_SUMMARY.
    */
   findMeetingsNeedingSummary(): SessionRow[] {
     return this.stmts.findMeetingsNeedingSummary.all() as SessionRow[];
@@ -888,11 +919,14 @@ export class JobStore {
         SET summary_status='failed'
         WHERE id=@id AND mode='meeting'
       `),
-      // Crash recovery: any leftover 'pending' row from a previous launch is
-      // flipped to 'failed' so the UI shows "Generate summary" (retry).
+      // Crash recovery: any leftover 'pending' row from a previous launch
+      // is cleared back to NULL (and its requested_at wiped) so the
+      // post-recovery auto-fire path picks it up for one fresh attempt.
+      // Backend dedupes by meeting_id, so re-firing is harmless even if
+      // the previous attempt actually completed server-side.
       recoverStaleSummaryPending: this.db.prepare(`
         UPDATE sessions
-        SET summary_status='failed'
+        SET summary_status=NULL, summary_requested_at=NULL
         WHERE summary_status='pending'
       `),
       findMeetingsNeedingSummary: this.db.prepare(`
@@ -900,12 +934,30 @@ export class JobStore {
         FROM sessions s
         WHERE s.mode = 'meeting'
           AND s.ended_at IS NOT NULL
-          AND (s.summary_status IS NULL OR s.summary_status = 'failed')
+          AND s.summary_status IS NULL
           AND EXISTS (
-            SELECT 1 FROM chunks c
-            WHERE c.session_id = s.id AND c.state = 'completed'
+            SELECT 1
+            FROM chunks c
+            JOIN transcripts t ON t.chunk_id = c.id
+            WHERE c.session_id = s.id
+              AND c.state = 'completed'
+              AND length(trim(t.text)) > 0
           )
         ORDER BY s.started_at ASC
+      `),
+      sessionHasTranscribedText: this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM chunks c
+        JOIN transcripts t ON t.chunk_id = c.id
+        WHERE c.session_id = @session_id
+          AND c.state = 'completed'
+          AND length(trim(t.text)) > 0
+      `),
+      sessionHasInFlightChunks: this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM chunks
+        WHERE session_id = @session_id
+          AND state IN ('captured', 'uploading', 'failed_retry')
       `),
 
       // ── chunks ──
