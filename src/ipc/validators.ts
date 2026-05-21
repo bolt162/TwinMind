@@ -266,6 +266,10 @@ const sessionGetOutput = sessionListItem.extend({
       endMs: z.number().int().nonnegative(),
       overlapPrefixMs: z.number().int().nonnegative(),
       text: z.string().max(64_000),
+      // Wall-clock epoch ms captured before /choose POST. Meeting transcript
+      // view renders HH:MM from this. Null for pre-migration rows and
+      // VAD-skipped chunks; the renderer falls back to relative MM:SS.
+      clockTimeMs: z.number().int().nonnegative().nullable(),
     }),
   ),
 });
@@ -299,6 +303,10 @@ const dictationListOutput = z.object({
             endMs: z.number().int().nonnegative(),
             overlapPrefixMs: z.number().int().nonnegative(),
             text: z.string().max(64_000),
+            // Kept in sync with sessionGetOutput's transcripts schema —
+            // dictation UI doesn't read this today but the field needs
+            // to pass through the IPC bridge for parity with SESSION_GET.
+            clockTimeMs: z.number().int().nonnegative().nullable(),
           }),
         ),
       }),
