@@ -25,6 +25,7 @@ export type AnalyticsEvent =
   | 'offline_queue_drained'
   | 'mic_activity_detected'
   | 'meeting_notification_shown'
+  | 'meeting_notification_failed'
   | 'meeting_notification_outcome'
   | 'meeting_detection_suppressed'
   | 'settings_changed'

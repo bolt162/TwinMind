@@ -89,11 +89,21 @@ export class MeetingDetectionService {
 
   /**
    * Record the outcome of a shown notification. Updates the activity log
-   * (transparency view in Settings) and starts the cooldown.
+   * (transparency view in Settings) and — ONLY when the user explicitly
+   * dismissed the prompt — starts the cooldown.
+   *
+   * The cooldown used to fire on every outcome (accepted / dismissed /
+   * timed_out), which meant a user finishing one meeting then immediately
+   * joining another wouldn't see a second prompt for 30 minutes. We treat
+   * 'dismissed' as the only signal that the user actively said "leave me
+   * alone for a while"; 'accepted' and 'timed_out' are silent / no-preference
+   * signals that shouldn't suppress future prompts.
    */
   recordOutcome(promptId: string, outcome: MeetingPromptOutcome): void {
     const now = this.deps.clock.now();
-    this.cooldownUntil = now + MEETING_COOLDOWN_MS;
+    if (outcome === 'dismissed') {
+      this.cooldownUntil = now + MEETING_COOLDOWN_MS;
+    }
     this.deps.store.recordMicActivityEvent({
       occurred_at: now,
       state: outcome === 'accepted' ? 'accepted' : outcome === 'dismissed' ? 'dismissed' : 'stopped',

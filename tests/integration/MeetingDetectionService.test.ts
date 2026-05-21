@@ -147,4 +147,44 @@ describe('MeetingDetectionService — cooldown', () => {
     vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
     expect(detected).toHaveBeenCalledTimes(2);
   });
+
+  it('does NOT start a cooldown when the outcome is accepted', () => {
+    const { service, emitStart, emitStop } = setup();
+    const detected = vi.fn();
+    service.onMeetingDetected(detected);
+    emitStart();
+    vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+    expect(detected).toHaveBeenCalledTimes(1);
+
+    // User accepts (started the recording). Cooldown must NOT engage —
+    // accepted is not a "leave me alone" signal.
+    const promptId = (detected.mock.calls[0]![0] as { promptId: string }).promptId;
+    service.recordOutcome(promptId, 'accepted');
+
+    // Immediate next meeting (e.g. user finished one call, jumped to another)
+    // should prompt without waiting 30 min.
+    emitStop();
+    emitStart();
+    vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+    expect(detected).toHaveBeenCalledTimes(2);
+  });
+
+  it('does NOT start a cooldown when the outcome is timed_out', () => {
+    const { service, emitStart, emitStop } = setup();
+    const detected = vi.fn();
+    service.onMeetingDetected(detected);
+    emitStart();
+    vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+    expect(detected).toHaveBeenCalledTimes(1);
+
+    // The notification timed out (60 s passed with no user interaction).
+    // Treat as no-preference signal — next meeting should still prompt.
+    const promptId = (detected.mock.calls[0]![0] as { promptId: string }).promptId;
+    service.recordOutcome(promptId, 'timed_out');
+
+    emitStop();
+    emitStart();
+    vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+    expect(detected).toHaveBeenCalledTimes(2);
+  });
 });

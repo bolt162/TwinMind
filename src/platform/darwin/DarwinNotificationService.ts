@@ -27,7 +27,20 @@ export class DarwinNotificationService implements INotificationService {
       actions: (spec.actions ?? []).map((a) => ({ type: 'button', text: a.label })),
       ...(spec.closeButtonText ? { closeButtonText: spec.closeButtonText } : {}),
     };
-    const n = new Notification(options);
+
+    // Constructor failures rethrow with a "stage" label so the caller's catch
+    // block can distinguish constructor failure from show() failure in logs —
+    // the two stages have different root causes (constructor: API
+    // unavailable / bad options; show: OS permission denied / notification
+    // center unreachable).
+    let n: Notification;
+    try {
+      n = new Notification(options);
+    } catch (err) {
+      throw new Error(
+        `notification constructor failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     // `close` fires for BOTH the auto-dismiss timer and a user clicking the
     // close button — distinguish them by tracking which path closed it.
@@ -45,7 +58,13 @@ export class DarwinNotificationService implements INotificationService {
       onAction(closedByTimer ? '__timed_out__' : '__close__');
     });
 
-    n.show();
+    try {
+      n.show();
+    } catch (err) {
+      throw new Error(
+        `notification show() failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     let timer: NodeJS.Timeout | null = null;
     if (spec.autoDismissMs) {

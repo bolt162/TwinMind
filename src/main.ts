@@ -1014,8 +1014,10 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
   // ─── Meeting auto-detection ──────────────────────────────────────────────
   if (c.meetingDetection) {
     c.meetingDetection.onMeetingDetected((evt) => {
-      c.analytics.track('meeting_notification_shown', { trigger: 'mic_activity' });
       const cfg = c.settings.load().settings;
+      // autoStart path: skip the notification, start recording silently.
+      // Tracked via the existing outcome event, NOT 'meeting_notification_shown'
+      // (which would lie — no notification was ever shown).
       if (cfg.meetingDetection.autoStart) {
         c.orchestrator.startMeeting();
         c.meetingDetection?.recordOutcome(evt.promptId, 'accepted');
@@ -1023,29 +1025,57 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
         hud?.revealOnActiveDisplay();
         return;
       }
-      s.platform.notifications.show(
-        {
-          title: 'Recording detected',
-          body: 'Start a meeting note?',
-          actions: [{ id: 'start', label: 'Start' }],
-          closeButtonText: 'Dismiss',
-          autoDismissMs: 60_000,
-        },
-        (action) => {
-          const outcome =
-            action === 'start'
-              ? 'accepted'
-              : action === '__timed_out__'
-                ? 'timed_out'
-                : 'dismissed';
-          c.meetingDetection?.recordOutcome(evt.promptId, outcome);
-          c.analytics.track('meeting_notification_outcome', { action: outcome });
-          if (outcome === 'accepted') {
-            c.orchestrator.startMeeting();
-            hud?.revealOnActiveDisplay();
-          }
-        },
-      );
+      // Normal path: try to show the notification. Wrap in try/catch because
+      // the underlying `new Notification()` / `notification.show()` can throw
+      // on macOS when the user has denied notification permission at the OS
+      // level (DarwinPermissionService can't introspect that state — always
+      // reports 'granted', see §investigation notes). Without this catch the
+      // exception used to be swallowed silently inside the event-listener
+      // callback, costing us every diagnostic signal we could've had.
+      try {
+        s.platform.notifications.show(
+          {
+            title: 'Recording detected',
+            body: 'Start a meeting note?',
+            actions: [{ id: 'start', label: 'Start' }],
+            closeButtonText: 'Dismiss',
+            autoDismissMs: 60_000,
+          },
+          (action) => {
+            const outcome =
+              action === 'start'
+                ? 'accepted'
+                : action === '__timed_out__'
+                  ? 'timed_out'
+                  : 'dismissed';
+            c.meetingDetection?.recordOutcome(evt.promptId, outcome);
+            c.analytics.track('meeting_notification_outcome', { action: outcome });
+            if (outcome === 'accepted') {
+              c.orchestrator.startMeeting();
+              hud?.revealOnActiveDisplay();
+            }
+          },
+        );
+        // Track AFTER show() returns without throwing — the event now
+        // honestly reflects "the OS accepted our notification call". Earlier
+        // versions fired this before show(), so the metric was useless for
+        // diagnosing the "users don't see notifications" bug.
+        c.analytics.track('meeting_notification_shown', { trigger: 'mic_activity' });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Intentionally LOUD — the previous silent-swallow was the bug.
+        s.logger.error('meeting_notification_show_failed', {
+          promptId: evt.promptId,
+          message: msg,
+        });
+        c.analytics.track('meeting_notification_failed', {
+          // Trim defensively; error messages from native code can be long.
+          message: msg.slice(0, 200),
+        });
+        // Deliberately do NOT call recordOutcome here — that would set the
+        // 30-min cooldown. For failures we want the NEXT mic activity to
+        // retry the notification, not be silently suppressed for half an hour.
+      }
     });
   }
 
