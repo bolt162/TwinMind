@@ -300,6 +300,12 @@ export interface SessionListItem {
   readonly summaryStatus: SummaryStatus | null;
   /** Backend-assigned summary id; null until `summaryStatus === 'completed'`. */
   readonly summaryId: string | null;
+  /**
+   * True if the session has at least one transcript row with non-empty text.
+   * Drives Copy / Generate-summary enabled state on the list rows without
+   * needing to fetch every session's transcripts up front.
+   */
+  readonly hasText: boolean;
 }
 
 /** Pushed whenever a session's summary state transitions. */

@@ -379,9 +379,9 @@ export class JobStore {
    */
   listSessionsWithFailureCounts(
     limit: number,
-  ): Array<SessionRow & { failed_count: number }> {
+  ): Array<SessionRow & { failed_count: number; has_text: number }> {
     return this.stmts.listSessionsWithFailureCounts.all({ limit }) as Array<
-      SessionRow & { failed_count: number }
+      SessionRow & { failed_count: number; has_text: number }
     >;
   }
 
@@ -855,7 +855,13 @@ export class JobStore {
             WHERE c.session_id = s.id
               AND c.state = 'failed_permanent'
               AND c.last_error_class IN ('network','timeout','rate_limit','server_5xx','unknown')
-          ), 0) AS failed_count
+          ), 0) AS failed_count,
+          CASE WHEN EXISTS(
+            SELECT 1 FROM transcripts t
+            JOIN chunks c ON c.id = t.chunk_id
+            WHERE c.session_id = s.id
+              AND length(trim(t.text)) > 0
+          ) THEN 1 ELSE 0 END AS has_text
         FROM sessions s
         ORDER BY s.started_at DESC
         LIMIT @limit

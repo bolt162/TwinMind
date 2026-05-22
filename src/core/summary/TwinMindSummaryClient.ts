@@ -22,6 +22,7 @@
 
 import { type Logger, noopLogger } from '@core/observability/Logger';
 import type { TwinMindBackendConfig } from '@core/auth/twinmindBackendConfig';
+import { resolveDeviceType } from '@core/util/deviceType';
 
 /** Per-meeting input. Times are epoch ms from the session row. */
 export interface SummaryRequest {
@@ -72,7 +73,6 @@ export interface TwinMindSummaryClientDeps {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
-const DEVICE_USED = 'twinmind_desktop';
 
 export class TwinMindSummaryClient {
   private readonly config: TwinMindSummaryClientDeps['config'];
@@ -154,7 +154,7 @@ export class TwinMindSummaryClient {
       log_data: true,
       personalization: '',
       metadata: {
-        deviceType: DEVICE_USED,
+        deviceType: resolveDeviceType(),
         log_Audio: 'false',
         durationMs,
         durationSeconds: Math.round(durationMs / 1000),

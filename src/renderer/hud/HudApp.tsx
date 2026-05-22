@@ -100,7 +100,11 @@ export function HudApp() {
     if (next) {
       setHovered(true);
     } else {
-      hoverTimeoutRef.current = setTimeout(() => setHovered(false), 180);
+      // 350 ms grace covers a slow-cursor traversal of the full hover
+      // group (Dictate → Take Notes → Home ≈ 270 px at typical casual
+      // speeds). Earlier 180 ms was tight when Take Notes was an icon-
+      // only chip; with the wider pill it's no longer enough.
+      hoverTimeoutRef.current = setTimeout(() => setHovered(false), 350);
     }
   };
   useEffect(() => {
@@ -394,19 +398,39 @@ export function HudApp() {
   };
 
   return (
-    <div
-      className={[
-        'flex h-full w-full items-center justify-center gap-2',
-        // When the pill is hugging the RIGHT edge of workArea, the default
-        // flex-row puts Take notes + Home buttons RIGHT of the pill — past
-        // the edge. Flip to flex-row-reverse so they appear LEFT instead,
-        // keeping the whole group inside the workArea. The pill stays at
-        // its dragged anchor; only the hover-additions flip sides.
-        edgeAnchor.x === 'right' ? 'flex-row-reverse' : '',
-      ]
-        .filter(Boolean)
-        .join(' ')}
-    >
+    <div className="flex h-full w-full items-center justify-center">
+      {/*
+        Inner wrapper that ALSO triggers hovered. Its bounding box covers
+        the three buttons PLUS the 8 px gaps between them, so the cursor
+        traversing a gap (or moving slightly above/below the buttons but
+        still within their row) keeps the group hovered. Without this,
+        the per-button handlers alone left dead-zones in the gaps that
+        the 350 ms grace timer could expire across. data-hud-interactive
+        is what `recheckIgnore` uses to keep the window click-receiving.
+      */}
+      <div
+        className={[
+          'flex items-center gap-2',
+          // Group layout is [Home] [Dictate] [Take Notes]. When the pill is
+          // hugging the RIGHT edge of workArea, default flex-row puts Take
+          // Notes off the edge; flex-row-reverse swaps the order so the
+          // small (28 px) Home button trails the pill instead of the wider
+          // (~120 px) Take Notes pill — much less overflow. Left edge
+          // intentionally NOT flipped because reversing there would push
+          // Take Notes (big) off-screen instead of Home (small).
+          edgeAnchor.x === 'right' ? 'flex-row-reverse' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        data-hud-interactive="true"
+        onMouseEnter={() => setGroupHovered(true)}
+        onMouseLeave={() => setGroupHovered(false)}
+      >
+      <HomeButton
+        visible={hovered}
+        onEnter={() => setGroupHovered(true)}
+        onLeave={() => setGroupHovered(false)}
+      />
       <button
         type="button"
         onClick={onPillClick}
@@ -428,7 +452,12 @@ export function HudApp() {
                     : 'Start dictation'
         }
         className={[
-          'flex items-center gap-1.5 rounded-full',
+          // justify-center keeps single-child states (idle EQ glyph,
+          // processing LoaderBars, busy dot+ellipsis) visually centered
+          // in the pill regardless of content area width. Has no effect
+          // on hoverIdle / recording, since those have a flex-1 child
+          // that fills available space (nothing to justify).
+          'flex items-center justify-center gap-1 rounded-full',
           'border border-white/40 bg-black/55 backdrop-blur-md',
           // shadow intentionally removed — the soft halo read as a faint
           // "box" around the buttons on transparent backdrops.
@@ -440,9 +469,7 @@ export function HudApp() {
           pillDisabled ? 'opacity-40 cursor-not-allowed' : '',
           visual === 'failed' || visual === 'disconnected' || visual === 'dictationLimit'
             ? 'px-6 py-4 items-stretch'
-            : expanded
-              ? 'px-3'
-              : 'px-2',
+            : 'px-2',
         ].join(' ')}
         style={{
           // Hover-idle width grows with the hotkey label so long bindings
@@ -496,7 +523,6 @@ export function HudApp() {
         )}
         {visual === 'recording' && (
           <>
-            <RecordingDot />
             <Waveform bars={barsRef.current} />
             <span className="shrink-0 text-[11px] font-medium tabular-nums text-white/85">
               {formatElapsed(elapsedSec)}
@@ -521,11 +547,26 @@ export function HudApp() {
           />
         )}
       </button>
+      {/*
+        Conditional render — not just opacity-0 — so Take Notes is COMPLETELY
+        gone from the DOM/layout during dictation. opacity-0 left a
+        transparent, layout-occupying ghost the user could perceive; this
+        removes the element entirely. Pops back into the layout when
+        dictation ends (no transition; instant reappearance).
+      */}
+      {!(isRecording && mode === 'dictation') && (
       <MeetingButton
-        // Stay visible while a meeting is recording so the user can stop it
-        // without having to hover to reveal the button. Otherwise behaves
-        // like HomeButton — opacity tied to group hover state.
+        // Visibility rules (within the conditional-render gate above):
+        //   - Recording meeting: ALWAYS visible (it's the stop affordance).
+        //   - Not recording: shown when the HUD group is hovered.
         visible={hovered || (isRecording && mode === 'meeting')}
+        // Drag plumbing — share the parent's drag refs so Take Notes is a
+        // valid grab-handle for moving the HUD, same as the Dictate pill.
+        // getDragMoved/clearDragMoved let handleClick suppress its own
+        // start/stop action when a drag ended over the button.
+        onMouseDown={onMouseDown}
+        getDragMoved={() => dragMoved.current}
+        clearDragMoved={() => { dragMoved.current = false; }}
         // Non-clickable while a dictation is recording. Pointer-events go
         // through, click handler is unreachable, no tooltip on hover.
         disabled={isRecording && mode === 'dictation'}
@@ -550,26 +591,29 @@ export function HudApp() {
           }
         }}
       />
-      <HomeButton
-        visible={hovered}
-        onEnter={() => setGroupHovered(true)}
-        onLeave={() => setGroupHovered(false)}
-      />
+      )}
+      </div>
     </div>
   );
 }
 
 /**
- * "Take notes" — the only entry point for meeting mode. Same visual
- * footprint as HomeButton (7x7 dark-glass circle). Three states:
+ * "Take notes" — the only entry point for meeting mode. A pill-shaped
+ * button that sits alongside the main dictation pill, mirroring its
+ * icon+label visual language so the two entry points feel like
+ * siblings. Three states:
  *
- *   idle / not recording   →  Radio icon. Click starts a meeting.
- *   recording (this mode)  →  Red dot. Click stops the meeting.
- *   disabled (dictating)   →  Faded; pointer-events: none. Click impossible.
+ *   idle / not recording   →  Radio icon + "Take Notes" label.
+ *                             Click starts a meeting.
+ *   recording (this mode)  →  Red dot + "Stop" label. Click stops the
+ *                             meeting. (Dictation pill is disabled in
+ *                             this state, so this button is the only
+ *                             affordance for ending the recording.)
+ *   disabled (dictating)   →  Faded; pointer-events: none.
  *
- * Hovering shows a small "Take notes" tooltip above the button — a hint
- * that's specifically requested for discoverability since the icon alone
- * doesn't say "meeting".
+ * No tooltip — the label is always visible inside the pill, so the
+ * separate floating tooltip that the icon-only version needed is
+ * redundant.
  */
 function MeetingButton({
   visible,
@@ -580,6 +624,9 @@ function MeetingButton({
   onLeave,
   onStart,
   onStop,
+  onMouseDown,
+  getDragMoved,
+  clearDragMoved,
 }: {
   visible: boolean;
   disabled: boolean;
@@ -589,10 +636,21 @@ function MeetingButton({
   onLeave: () => void;
   onStart: () => void;
   onStop: () => void;
+  /** Forwarded from HudApp so dragging from this button moves the window. */
+  onMouseDown?: React.MouseEventHandler<HTMLButtonElement>;
+  /** Lets us check whether the just-completed gesture was a drag. */
+  getDragMoved?: () => boolean;
+  /** Resets the shared drag flag after we've consumed it in handleClick. */
+  clearDragMoved?: () => void;
 }) {
-  const [tipShown, setTipShown] = useState(false);
-
   const handleClick = () => {
+    // Same guard as the main pill: if the user dragged the HUD while
+    // holding this button, the mouseup fires a click — swallow it so the
+    // drag-to-reposition gesture doesn't also start/stop a meeting.
+    if (getDragMoved?.()) {
+      clearDragMoved?.();
+      return;
+    }
     if (disabled) return;
     if (recordingMeeting) {
       onStop();
@@ -601,59 +659,47 @@ function MeetingButton({
     if (canStart) onStart();
   };
 
-  const handleEnter = () => {
-    onEnter();
-    if (!disabled) setTipShown(true);
-  };
-  const handleLeave = () => {
-    onLeave();
-    setTipShown(false);
-  };
-
   return (
-    <div className="relative">
-      {tipShown && !disabled && !recordingMeeting && (
-        // Centered above the button; small gap (1.5) so the tail of the
-        // tooltip doesn't touch the button border. Dark-glass styling matches
-        // the rest of the HUD chrome.
-        <div
-          className="pointer-events-none absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-white/20 bg-black/80 px-2 py-0.5 text-[10px] font-medium text-white/90 backdrop-blur-md"
-          role="tooltip"
-        >
-          Take notes
-        </div>
+    <button
+      type="button"
+      onClick={handleClick}
+      onMouseDown={onMouseDown}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+      aria-label={
+        disabled
+          ? 'Take notes (unavailable while dictating)'
+          : recordingMeeting
+            ? 'Stop meeting'
+            : 'Take notes'
+      }
+      data-hud-interactive="true"
+      className={[
+        // h-8 (32 px) intentionally matches PILL_HEIGHT_EXPANDED on the
+        // main pill so the two pills sit at the same baseline in
+        // hoverIdle. Previously h-7 (28 px) made them visibly mismatched.
+        'flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3',
+        'border border-white/40 bg-black/55 backdrop-blur-md',
+        'transition-opacity duration-150',
+        disabled
+          ? 'pointer-events-none opacity-40 text-white/40'
+          : visible || recordingMeeting
+            ? 'opacity-100 text-white/85 hover:text-white hover:bg-black/70'
+            : 'pointer-events-none opacity-0 text-white/85',
+      ].join(' ')}
+    >
+      {recordingMeeting ? (
+        // Filled red square = standard "stop" affordance. rounded-[1px]
+        // softens the corners just a hair so it doesn't look like a dead
+        // pixel; full sharp corners look broken at this size.
+        <span className="h-2 w-2 shrink-0 rounded-[1px] bg-red-500" />
+      ) : (
+        <Radio className="h-3.5 w-3.5 shrink-0" />
       )}
-      <button
-        type="button"
-        onClick={handleClick}
-        onMouseEnter={handleEnter}
-        onMouseLeave={handleLeave}
-        aria-label={
-          disabled
-            ? 'Take notes (unavailable while dictating)'
-            : recordingMeeting
-              ? 'Stop meeting'
-              : 'Take notes'
-        }
-        data-hud-interactive="true"
-        className={[
-          'flex h-7 w-7 shrink-0 items-center justify-center rounded-full',
-          'border border-white/40 bg-black/55 backdrop-blur-md',
-          'transition-opacity duration-150',
-          disabled
-            ? 'pointer-events-none opacity-40 text-white/40'
-            : visible || recordingMeeting
-              ? 'opacity-100 text-white/80 hover:text-white hover:bg-black/70'
-              : 'pointer-events-none opacity-0 text-white/80',
-        ].join(' ')}
-      >
-        {recordingMeeting ? (
-          <span className="h-2 w-2 rounded-full bg-red-500" />
-        ) : (
-          <Radio className="h-3.5 w-3.5" />
-        )}
-      </button>
-    </div>
+      <span className="text-[11px] font-medium tracking-wide">
+        {recordingMeeting ? 'Stop' : 'Take Notes'}
+      </span>
+    </button>
   );
 }
 
@@ -726,7 +772,7 @@ function pillWidth(v: PillVisual): number {
     case 'busy':
       return 80;
     case 'recording':
-      return 196;
+      return 140;
     case 'processing':
       return 56;
     case 'failed':
@@ -757,20 +803,10 @@ function pillHeight(v: PillVisual): number {
   return PILL_HEIGHT_EXPANDED;
 }
 
-/** Solid red dot with a soft outer halo while recording. */
-function RecordingDot() {
-  return (
-    <span className="relative inline-flex h-2 w-2 shrink-0 items-center justify-center">
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-500/50" />
-      <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
-    </span>
-  );
-}
-
 /** Live recording waveform: 20 bars driven by the amplitude-sample buffer. */
 function Waveform({ bars }: { bars: readonly number[] }) {
   return (
-    <span className="flex h-full flex-1 items-center justify-center gap-[2px]">
+    <span className="flex h-full flex-1 items-center justify-center gap-[1px]">
       {bars.map((v, i) => {
         const scaled = Math.min(1, Math.sqrt(Math.max(0, v)) * AMP_GAIN);
         const px = Math.round(

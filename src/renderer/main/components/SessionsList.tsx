@@ -11,6 +11,8 @@ import { useState } from 'react';
 import { Trash2, Mic, Radio, RotateCw } from 'lucide-react';
 import { useSessions, type SessionListItem } from '../hooks/useSessions';
 import { SessionDetail } from './SessionDetail';
+import { SummaryButton } from './SummaryButton';
+import { CopyMeetingTranscriptListButton } from './CopyMeetingTranscriptListButton';
 import { cn } from './cn';
 
 interface SessionsListProps {
@@ -99,66 +101,107 @@ function SessionRow({
     }
   };
 
+  // Mirror SessionDetail's gate exactly: summary affordance is meeting-only
+  // and only after the recording has ended. Active / paused / dictation
+  // rows skip it entirely.
+  const showSummary = session.mode === 'meeting' && session.status === 'ended';
+  // Copy is meeting-only too — the detail view only renders Copy inside the
+  // `mode === 'meeting'` transcript header.
+  const showCopy = session.mode === 'meeting';
+  const showActionsRow = showSummary || showCopy;
+
   return (
     <li
       className={cn(
-        'group flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 transition-colors',
+        'group flex flex-col gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 transition-colors',
         'hover:border-zinc-700 hover:bg-zinc-900',
       )}
     >
-      <button
-        type="button"
-        onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
-      >
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
-          <Icon className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 truncate text-sm font-medium text-zinc-100">
-              {session.title ?? `Untitled ${session.mode}`}
-            </span>
-            {isLive && (
-              <span className="shrink-0 rounded-full bg-red-600/30 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
-                live
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        >
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
+            <Icon className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 truncate text-sm font-medium text-zinc-100">
+                {session.title ?? `Untitled ${session.mode}`}
               </span>
+              {isLive && (
+                <span className="shrink-0 rounded-full bg-red-600/30 px-1.5 py-0.5 text-[10px] font-medium text-red-300">
+                  live
+                </span>
+              )}
+            </div>
+            {/* For meetings the date moves to the actions row below so the
+                title row can stay compact. For dictations we keep the date
+                here since no actions row is rendered. */}
+            {!showActionsRow && (
+              <div className="truncate text-xs text-zinc-500">
+                {startedAt.toLocaleString()}
+                {session.status === 'paused_by_sleep' && ' · paused by sleep'}
+              </div>
             )}
           </div>
-          <div className="truncate text-xs text-zinc-500">
+        </button>
+        {hasFailures && (
+          <button
+            type="button"
+            onClick={handleRetry}
+            disabled={retrying}
+            className={cn(
+              'flex shrink-0 items-center gap-1 rounded-md border border-amber-800/70 bg-amber-900/30 px-2 py-1 text-xs font-medium text-amber-200',
+              'hover:bg-amber-900/50 disabled:opacity-60',
+            )}
+            aria-label={`Retry ${session.failedCount} failed chunks`}
+          >
+            <RotateCw className={cn('h-3 w-3', retrying && 'animate-spin')} />
+            Retry
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (confirm(`Delete "${session.title ?? session.mode}"? Audio and transcripts are removed.`)) {
+              onDelete();
+            }
+          }}
+          className="shrink-0 rounded-md p-1.5 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-800 hover:text-zinc-200 group-hover:opacity-100"
+          aria-label="Delete session"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </div>
+      {showActionsRow && (
+        <div className="flex items-center gap-2 pl-11">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {showCopy && (
+              <CopyMeetingTranscriptListButton
+                sessionId={session.id}
+                sessionStartedAt={session.startedAt}
+                hasText={session.hasText}
+              />
+            )}
+            {showSummary && (
+              <SummaryButton
+                sessionId={session.id}
+                status={session.summaryStatus}
+                hasText={session.hasText}
+                variant="outline"
+              />
+            )}
+          </div>
+          <div className="shrink-0 truncate text-xs text-zinc-500">
             {startedAt.toLocaleString()}
             {session.status === 'paused_by_sleep' && ' · paused by sleep'}
           </div>
         </div>
-      </button>
-      {hasFailures && (
-        <button
-          type="button"
-          onClick={handleRetry}
-          disabled={retrying}
-          className={cn(
-            'flex shrink-0 items-center gap-1 rounded-md border border-amber-800/70 bg-amber-900/30 px-2 py-1 text-xs font-medium text-amber-200',
-            'hover:bg-amber-900/50 disabled:opacity-60',
-          )}
-          aria-label={`Retry ${session.failedCount} failed chunks`}
-        >
-          <RotateCw className={cn('h-3 w-3', retrying && 'animate-spin')} />
-          Retry
-        </button>
       )}
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          if (confirm(`Delete "${session.title ?? session.mode}"? Audio and transcripts are removed.`)) {
-            onDelete();
-          }
-        }}
-        className="shrink-0 rounded-md p-1.5 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-800 hover:text-zinc-200 group-hover:opacity-100"
-        aria-label="Delete session"
-      >
-        <Trash2 className="h-4 w-4" />
-      </button>
     </li>
   );
 }

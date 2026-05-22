@@ -256,6 +256,7 @@ const sessionListItem = z.object({
   audioDurationMs: z.number().int().nonnegative().nullable(),
   summaryStatus: summaryStatus.nullable(),
   summaryId: z.string().max(128).nullable(),
+  hasText: z.boolean(),
 });
 
 const sessionListInput = z.object({

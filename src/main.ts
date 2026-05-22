@@ -572,6 +572,7 @@ function wireIpc(b: IpcBridgeMain): void {
           audioDurationMs: audioMs > 0 ? audioMs : null,
           summaryStatus: s.summary_status,
           summaryId: s.summary_id,
+          hasText: s.has_text === 1,
         };
       }),
     };
@@ -592,6 +593,7 @@ function wireIpc(b: IpcBridgeMain): void {
       audioDurationMs: audioMs > 0 ? audioMs : null,
       summaryStatus: r.session.summary_status,
       summaryId: r.session.summary_id,
+      hasText: r.transcripts.some((t) => t.text.trim().length > 0),
       transcripts: r.transcripts,
     };
   });

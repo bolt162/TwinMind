@@ -16,6 +16,12 @@ export interface SessionListItem {
   failedCount: number;
   /** Captured audio total in ms (max chunk.end_ms); null when no chunks. */
   audioDurationMs: number | null;
+  /** Per-meeting summary lifecycle; null for dictation / not attempted. */
+  summaryStatus: 'pending' | 'completed' | 'failed' | null;
+  /** Backend-assigned summary id once `summaryStatus === 'completed'`. */
+  summaryId: string | null;
+  /** True if the session has at least one transcript row with non-empty text. */
+  hasText: boolean;
 }
 
 export function useSessions(limit = 50) {

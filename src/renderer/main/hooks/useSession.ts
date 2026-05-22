@@ -34,6 +34,8 @@ export interface SessionDetailData {
   summaryStatus: 'pending' | 'completed' | 'failed' | null;
   /** Backend-assigned summary id once `summaryStatus === 'completed'`. */
   summaryId: string | null;
+  /** True if the session has at least one transcript row with non-empty text. */
+  hasText: boolean;
   transcripts: SessionTranscriptItem[];
 }
 

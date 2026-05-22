@@ -86,9 +86,12 @@ export function SettingsPage() {
             onChange={(v) => setPath('hotkeys.primary', v)}
           />
           <span className="block text-xs text-zinc-500">
-            Hold = dictation; double-tap = start meeting; single-tap = stop meeting.
-            Supports modifier-only (e.g., right ⌥) or modifier + key (e.g., ⌘⇧D).
-            Setting a hotkey here disables the Fn (Globe) key.
+            Hold = press-to-talk dictation; double-tap = hands-free dictation
+            (single-tap to stop). The hotkey is dictation-only — meetings are
+            started and stopped from the floating button. Supports modifier-only
+            (e.g., right ⌥) or modifier + key (e.g., ⌘⇧D). Setting a non-Fn
+            hotkey here disables the Fn (Globe) key as a built-in dictation
+            shortcut.
           </span>
         </div>
       </Section>

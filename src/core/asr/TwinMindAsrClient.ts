@@ -10,9 +10,13 @@
  *   Authorization: Bearer <firebase id token>
  *   Body (multipart/form-data):
  *     file:           the chunk's WebM/Opus file
- *     device_used:    'twinmind_desktop'
+ *     device_used:    'mac' | 'windows' | 'desktop' (platform-derived)
  *     meeting_id:     the V2 session id (groups multiple chunks of one recording)
  *     chunk_duration: chunk length in seconds
+ *     start_time:     ISO 8601 UTC, audio start (e.g. '2026-05-22T19:04:23.000Z')
+ *     end_time:       ISO 8601 UTC, audio end
+ *     timezone:       IANA tz of the host (e.g. 'America/Los_Angeles')
+ *     mode:           'quick-dictation' on dictation calls; omitted for meeting
  *     log_data:       'true' for meeting, 'false' for dictation (privacy)
  *     log_audio:      'false'       (do NOT store raw audio server-side)
  *
@@ -44,6 +48,7 @@ import type {
 import type { Logger } from '@core/observability/Logger';
 import { noopLogger } from '@core/observability/Logger';
 import type { TwinMindBackendConfig } from '@core/auth/twinmindBackendConfig';
+import { resolveDeviceType } from '@core/util/deviceType';
 
 /** What the client needs to mint + refresh tokens. Matches TwinMindAuthProvider. */
 export interface AsrCredentialsProvider {
@@ -83,7 +88,6 @@ const BASE_TIMEOUT_MS = 30_000;
  * For a 5-min chunk that's 150 s + 30 s base = 180 s total.
  */
 const TIMEOUT_PER_AUDIO_SECOND_MS = 500;
-const DEVICE_USED = 'twinmind_desktop';
 
 /** Shape of the response body we tolerate from the TwinMind transcribe endpoint. */
 interface TwinMindResponse {
@@ -191,7 +195,7 @@ export class TwinMindAsrClient implements IAsrClient {
       new Blob([new Uint8Array(audioBytes)], { type: 'audio/webm' }),
       filename,
     );
-    form.append('device_used', DEVICE_USED);
+    form.append('device_used', resolveDeviceType());
     form.append('meeting_id', req.sessionId);
     form.append(
       'chunk_duration',
@@ -203,6 +207,15 @@ export class TwinMindAsrClient implements IAsrClient {
     // correct when uploads are delayed (queue backup, retry, crash recovery).
     form.append('start_time', new Date(req.chunkWallClockStartMs).toISOString());
     form.append('end_time', new Date(req.chunkWallClockEndMs).toISOString());
+    // IANA timezone identifier of the desktop host (e.g.
+    // "America/Los_Angeles"). The start_time/end_time fields above are in
+    // UTC, so the absolute moment is unambiguous; this field lets the
+    // backend render local-time labels in summaries / analytics without
+    // having to guess from the user's profile. Computed per-request (not
+    // cached) so a user who travels mid-session reports the timezone they
+    // were in when the chunk was captured. Defaults to "UTC" if Intl
+    // returns nothing usable — unlikely on macOS, but defensive.
+    form.append('timezone', resolveSystemTimezone());
     // Per-mode model selection. Meeting mode pins `twinmind-pro` (V1
     // behavior). Dictation now OMITS the `model` field entirely so the
     // backend's `/api/v2/transcribe/choose` endpoint picks its default —
@@ -211,6 +224,13 @@ export class TwinMindAsrClient implements IAsrClient {
     // `this.config.dictationModel`.
     if (req.mode === 'meeting') {
       form.append('model', this.config.meetingModel);
+    }
+    // Dictation-only marker so the backend can route / analyze quick
+    // dictation traffic separately from meeting traffic. Meeting calls
+    // omit the field — backend infers from the multi-chunk-per-meeting_id
+    // shape and the pinned model.
+    if (req.mode === 'dictation') {
+      form.append('mode', 'quick-dictation');
     }
     // Telemetry:
     //   - log_audio: ALWAYS false — never retain raw audio server-side.
@@ -316,3 +336,20 @@ function describeError(e: unknown): string {
   if (typeof e === 'string') return e;
   return 'unknown error';
 }
+
+/**
+ * Best-effort IANA timezone identifier for the host (e.g.
+ * "America/Los_Angeles"). Falls back to "UTC" if Intl is absent or returns
+ * an empty string — extremely unlikely on macOS but defensive enough that
+ * a missing timezone never breaks a transcribe.
+ */
+function resolveSystemTimezone(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof tz === 'string' && tz.length > 0) return tz;
+  } catch {
+    // fall through
+  }
+  return 'UTC';
+}
+

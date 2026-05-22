@@ -39,8 +39,24 @@ const DISPLAY_MARGIN = 24;
 // past the workArea edges.
 const PILL_IDLE_WIDTH = 44;
 const PILL_IDLE_HEIGHT = 22;
-const HOVER_GROUP_WIDTH = 116; // pill + 8 gap + 28 meeting + 8 gap + 28 home
-const PILL_OFFSET_X = (HUD_WIDTH - HOVER_GROUP_WIDTH) / 2; // 182
+// Static layout anchor: positions the idle pill within the 480px window
+// based on the SUM of all rendered children (incl. opacity-0 siblings).
+// Idle layout: [Home(28)] + 8 + [Dictate pill(44)] + 8 + [Take Notes(~120)]
+// = 208. With justify-center, the group's left edge sits at
+// (480 - 208) / 2 = 136. The Dictate pill is the SECOND child of the
+// group, so its left edge is at group-left + Home(28) + gap(8) = 172.
+// Get this wrong and drag clamping doesn't match the rendered pill
+// position → pill can be dragged off-screen.
+const HOVER_GROUP_WIDTH = 208;
+const HOME_BUTTON_WIDTH = 28;
+const GROUP_GAP = 8;
+const PILL_OFFSET_X =
+  Math.round((HUD_WIDTH - HOVER_GROUP_WIDTH) / 2) + HOME_BUTTON_WIDTH + GROUP_GAP;
+// Dynamic visible bounds in hover-idle: Home(28) + 8 gap + main pill
+// (expanded ~140) + 8 gap + Take Notes pill(~120) ≈ 304. Used only by the
+// workArea clamping check below — if the user has the HUD dragged near
+// a screen edge, this is the bounds we don't want to overflow.
+const HOVER_GROUP_VISIBLE_WIDTH = 304;
 const PILL_OFFSET_Y = (HUD_HEIGHT - PILL_IDLE_HEIGHT) / 2; // 51
 
 // Threshold (px) for declaring the pill "near" an edge — used to flip the
@@ -63,9 +79,9 @@ const EDGE_ANCHOR_THRESHOLD_PX = 12;
  */
 const VISUAL_BOUNDS: Record<HudPillVisual, { width: number; height: number }> = {
   idle: { width: PILL_IDLE_WIDTH, height: PILL_IDLE_HEIGHT },
-  hoverIdle: { width: HOVER_GROUP_WIDTH, height: 28 },
+  hoverIdle: { width: HOVER_GROUP_VISIBLE_WIDTH, height: 28 },
   busy: { width: 80, height: 32 },
-  recording: { width: 196, height: 32 },
+  recording: { width: 140, height: 32 },
   processing: { width: 60, height: 32 },
   failed: { width: 400, height: 100 },
   dictationLimit: { width: 400, height: 100 },

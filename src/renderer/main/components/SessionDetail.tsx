@@ -7,8 +7,10 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronLeft, Copy, ExternalLink, Loader2, Mic, Radio, Sparkles } from 'lucide-react';
+import { Check, ChevronLeft, Copy, Loader2, Mic, Radio } from 'lucide-react';
 import { useSession } from '../hooks/useSession';
+import { SummaryButton } from './SummaryButton';
+import { formatClockHHMM, formatTranscriptForClipboard } from './transcriptClipboard';
 
 interface Props {
   readonly sessionId: string;
@@ -91,93 +93,6 @@ function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSessio
     </div>
   );
 }
-
-/**
- * Per-meeting summary affordance. Lives in the transcript header alongside
- * the Copy button so the two actions share a visual row.
- *
- *   completed → "View Summary" — opens `${TWINMIND_APP_URL}/m/${sessionId}`
- *               externally via the host-validated MISC_OPEN_EXTERNAL_URL IPC.
- *               Always enabled (user can re-open the link even if the
- *               transcript was wiped client-side).
- *   pending   → "Generating summary…" (disabled). The summary call is in
- *               flight; useSession will reload on the next push.
- *   failed    → "Generate summary" — clicking re-fires the request via
- *               SESSION_RETRY_SUMMARY. Same path the auto-trigger uses.
- *   null      → "Generate summary" — auto-trigger hasn't fired yet (e.g.
- *               chunks still landing). Clicking fires it manually.
- *
- * `hasText` disables Generate — same gate as the Copy button — because
- * the backend rejects empty-transcript summary requests with a 500.
- *
- * For a dictation session this component never mounts (the caller gates it).
- */
-function SummaryButton({
-  sessionId,
-  status,
-  hasText,
-}: {
-  sessionId: string;
-  status: 'pending' | 'completed' | 'failed' | null;
-  hasText: boolean;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const isCompleted = status === 'completed';
-  const isPending = status === 'pending';
-  // Generate requires transcript text; View has no such requirement.
-  const disabled = isPending || busy || (!isCompleted && !hasText);
-
-  const handleClick = async () => {
-    if (disabled) return;
-    setError(null);
-    if (isCompleted) {
-      // Main builds the deep link from the configured TWINMIND_APP_URL +
-      // session id, then opens it externally. The renderer never crafts a
-      // URL the user could be tricked into following.
-      try {
-        await window.electronAPI.sessions.openSummary({ sessionId });
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-      return;
-    }
-    setBusy(true);
-    try {
-      await window.electronAPI.sessions.retrySummary({ sessionId });
-      // useSession refreshes on `summary_state_changed`; no manual reload.
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const label = isPending
-    ? 'Generating summary…'
-    : isCompleted
-      ? 'View Summary'
-      : 'Generate summary';
-
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={handleClick}
-        disabled={disabled}
-        className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[11px] text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-zinc-800/50"
-        aria-label={label}
-        title={label}
-      >
-        {isCompleted ? <ExternalLink className="h-3 w-3" /> : <Sparkles className="h-3 w-3" />}
-        <span>{label}</span>
-      </button>
-      {error && <span className="text-[11px] text-red-400">{error}</span>}
-    </div>
-  );
-}
-
 
 /**
  * Click-to-edit title. Optimistic: the on-screen value flips immediately on
@@ -386,13 +301,7 @@ function CopyMeetingTranscriptButton({
 }) {
   const [copied, setCopied] = useState(false);
 
-  const text = items
-    .filter((t) => t.text.trim().length > 0)
-    .map((t) => {
-      const hhmm = formatClockHHMM(sessionStartedAt + t.startMs + t.overlapPrefixMs);
-      return `[${hhmm}] ${t.text.trim()}`;
-    })
-    .join('\n\n');
+  const text = formatTranscriptForClipboard(items, sessionStartedAt);
 
   const handleCopy = async () => {
     if (!hasText) return;
@@ -413,27 +322,20 @@ function CopyMeetingTranscriptButton({
       type="button"
       onClick={handleCopy}
       disabled={!hasText}
-      className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[11px] text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-zinc-800/50"
+      className="inline-flex items-center gap-1 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-[11px] font-medium text-black transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white"
       aria-label={copied ? 'Copied' : 'Copy transcript'}
       title={copied ? 'Copied' : 'Copy transcript'}
     >
       {copied ? (
-        <Check className="h-3 w-3 text-emerald-400" />
+        // Slightly darker green on white background — emerald-400 is too
+        // faint against pure white to read as the success affordance.
+        <Check className="h-3 w-3 text-emerald-600" />
       ) : (
         <Copy className="h-3 w-3" />
       )}
       <span>{copied ? 'Copied' : 'Copy'}</span>
     </button>
   );
-}
-
-/** Format epoch ms as 24-hour `HH:MM` in the user's locale (e.g. "14:02"). */
-function formatClockHHMM(ms: number): string {
-  return new Date(ms).toLocaleTimeString('en-GB', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
 }
 
 function formatTimestamp(ms: number): string {

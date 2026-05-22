@@ -4,6 +4,7 @@ import {
   TwinMindSummaryClient,
   parseFinalSummaryLine,
 } from '@core/summary/TwinMindSummaryClient';
+import { resolveDeviceType } from '@core/util/deviceType';
 
 function buildClient(responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }>) {
   const calls: Array<{ url: string; init: RequestInit | undefined; auth: string | null; body: string }> = [];
@@ -81,7 +82,10 @@ describe('TwinMindSummaryClient — request shape', () => {
     expect(sent.log_data).toBe(true);
     expect(sent.personalization).toBe('');
     const meta = sent.metadata as Record<string, unknown>;
-    expect(meta.deviceType).toBe('twinmind_desktop');
+    // device value is platform-derived ('mac' on macOS CI, 'windows' on
+    // Windows, 'desktop' fallback). Reuse the resolver so the assertion
+    // stays correct on whatever host runs the test.
+    expect(meta.deviceType).toBe(resolveDeviceType());
     expect(meta.log_Audio).toBe('false');
     expect(meta.durationMs).toBe(60_000);
     expect(meta.durationSeconds).toBe(60);
