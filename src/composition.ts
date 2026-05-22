@@ -52,6 +52,7 @@ import { MockAsrClient } from '@core/asr/MockAsrClient';
 import type { IAsrClient } from '@core/asr/IAsrClient';
 import { TwinMindSummaryClient } from '@core/summary/TwinMindSummaryClient';
 import { ChunkWriter } from '@core/audio/ChunkWriter';
+import { WebmEncoder } from '@core/audio/WebmEncoder';
 import { RecordingOrchestrator } from '@core/audio/RecordingOrchestrator';
 import { DiskMonitor } from '@core/audio/DiskMonitor';
 import { MeetingDetectionService } from '@core/meeting/MeetingDetectionService';
@@ -93,8 +94,10 @@ export interface Shell {
   readonly logger: Logger;
   readonly crash: ICrashReporter;
   readonly analytics: IAnalyticsClient;
-  /** Build a per-user ComposedApp. Caller owns its lifetime. */
-  composeForUser(userId: string): ComposedApp;
+  /** Build a per-user ComposedApp. Caller owns its lifetime. Async because
+   *  composition runs recovery, which now spawns ffmpeg to re-encode orphan
+   *  PCM (and legacy WAV) files left by a prior crash. */
+  composeForUser(userId: string): Promise<ComposedApp>;
   /** Tear down shell-only resources (auth timer, global DB, analytics). */
   shutdown(): Promise<void>;
 }
@@ -256,7 +259,7 @@ interface ComposeForUserInput {
   readonly clock: Clock;
 }
 
-function composeForUser({ shell, userId, clock }: ComposeForUserInput): ComposedApp {
+async function composeForUser({ shell, userId, clock }: ComposeForUserInput): Promise<ComposedApp> {
   const paths: UserPaths = userPathsFor(shell.userDataDir, userId);
   ensureUserTree(paths);
 
@@ -283,7 +286,14 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
   const loaded = settings.load();
   const cfg: AppSettings = loaded.settings;
 
-  // ─── Recovery (synchronous, before anything network-y starts) ───────────
+  // ─── Encoder (shared between ChunkWriter and RecoveryService) ───────────
+  // Constructed up here so RecoveryService can re-encode orphan `.pcm` and
+  // legacy `.wav` files at launch. Throws if ffmpeg-static can't be resolved
+  // for this platform — fail loud rather than degrading silently.
+  const webmEncoder = new WebmEncoder();
+
+  // ─── Recovery (runs before anything network-y starts; awaits ffmpeg
+  // for orphan-PCM / legacy-WAV re-encoding) ──────────────────────────────
   const recovery = new RecoveryService(
     jobStore,
     clock,
@@ -293,8 +303,9 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
       retentionMs: cfg.privacy.autoDeleteOlderThanDays * 24 * 60 * 60 * 1000,
     },
     logger,
+    webmEncoder,
   );
-  const recoveryReport = recovery.recover();
+  const recoveryReport = await recovery.recover();
   if (
     recoveryReport.staleSleepSessions +
       recoveryReport.resetUploading +
@@ -303,20 +314,30 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
       recoveryReport.retentionFilesDeleted +
       recoveryReport.crashRecoveredActive +
       recoveryReport.unresumedDeviceLoss +
-      recoveryReport.recoveredOrphanWavs >
+      recoveryReport.recoveredOrphanPcms +
+      recoveryReport.recoveredOrphanWebms +
+      recoveryReport.recoveredLegacyWavs >
     0
   ) {
+    const chunksRecovered =
+      recoveryReport.resetUploading +
+      recoveryReport.recoveredOrphanPcms +
+      recoveryReport.recoveredOrphanWebms +
+      recoveryReport.recoveredLegacyWavs;
     shell.analytics.track('crash_recovery_performed', {
-      chunks_recovered: recoveryReport.resetUploading + recoveryReport.recoveredOrphanWavs,
+      chunks_recovered: chunksRecovered,
       sessions_affected:
         recoveryReport.staleSleepSessions +
         recoveryReport.crashRecoveredActive +
         recoveryReport.unresumedDeviceLoss,
       // Per-bucket counters so the dashboard can distinguish a graceful
-      // sleep-resume timeout from an actual crash recovery.
+      // sleep-resume timeout from an actual crash recovery, and track the
+      // legacy-WAV shim's usage post-migration.
       crash_recovered_active: recoveryReport.crashRecoveredActive,
       unresumed_device_loss: recoveryReport.unresumedDeviceLoss,
-      recovered_orphan_wavs: recoveryReport.recoveredOrphanWavs,
+      recovered_orphan_pcms: recoveryReport.recoveredOrphanPcms,
+      recovered_orphan_webms: recoveryReport.recoveredOrphanWebms,
+      recovered_legacy_wavs: recoveryReport.recoveredLegacyWavs,
     });
   }
 
@@ -339,11 +360,15 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
   uploadQueue.start();
 
   // ─── Audio pipeline ─────────────────────────────────────────────────────
+  // ChunkWriter shares the same WebmEncoder instance the recovery pass uses;
+  // construction happened above. Single instance is fine — encode() is
+  // stateless (one ffmpeg subprocess per call).
   const chunkWriter = new ChunkWriter(
     jobStore,
     clock,
     paths.recordingsDir,
     { silenceThresholdDbfs: cfg.advanced.vadSilenceThresholdDbfs },
+    webmEncoder,
     logger,
   );
   const orchestrator = new RecordingOrchestrator({
@@ -423,12 +448,16 @@ function composeForUser({ shell, userId, clock }: ComposeForUserInput): Composed
       if (wasRecording) orchestrator.stop('shutdown');
       meetingDetection?.stop();
       diskMonitor.stop();
+      // Wait for any in-flight closeChunk encodes to settle BEFORE tearing
+      // down the upload queue / DB. Without this we'd race ffmpeg against
+      // db.close() and could leave a half-encoded `.webm` on disk that the
+      // orphan-WebM recovery pass would re-pick up next launch.
+      await orchestrator.drainPendingChunkCloses();
       await uploadQueue.stop();
-      // If we were recording, finalize any in-flight WAV files into DB
-      // rows so the last chunk doesn't get orphaned (the audio-process's
-      // chunk_closed reply may never land before before-quit kills the
-      // utility process). When not recording, abortAll is the right call —
-      // it just clears the active map (which is empty in that case anyway).
+      // If we were recording, any chunks still mid-capture (their
+      // chunk_closed reply never landed before utility-process teardown)
+      // have their `.pcm` left on disk for next-launch recovery. When not
+      // recording, abortAll just clears the (empty) active map.
       if (wasRecording) {
         chunkWriter.finalizeAllOnShutdown();
       } else {

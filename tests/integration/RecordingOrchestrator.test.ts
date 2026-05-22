@@ -9,6 +9,7 @@ import { prepareDatabase } from '@core/storage/Migrator';
 import { JobStore } from '@core/storage/JobStore';
 import { FakeClock } from '@core/util/Clock';
 import { ChunkWriter } from '@core/audio/ChunkWriter';
+import { WebmEncoder } from '@core/audio/WebmEncoder';
 import { InMemoryAudioLink } from '@core/audio/AudioProcessLink';
 import { RecordingOrchestrator } from '@core/audio/RecordingOrchestrator';
 import type { AudioToMain, MainToAudio } from '@audio-process/protocol';
@@ -22,13 +23,35 @@ interface Harness {
   writer: ChunkWriter;
 }
 
-function setup(vadDbfs = -50): Harness {
+/**
+ * Test-only encoder that mimics WebmEncoder's shape without spawning ffmpeg.
+ * Reads the .pcm file, writes a stub `.webm` containing the EBML magic
+ * header (so downstream "is this a webm?" checks pass) plus the raw PCM
+ * payload as a marker. Keeps tests fast and deterministic.
+ */
+class FakeEncoder {
+  async encode(pcmPath: string, webmPath: string): Promise<{ bytes: number }> {
+    const pcm = fs.readFileSync(pcmPath);
+    const ebml = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+    const out = Buffer.concat([ebml, pcm]);
+    fs.writeFileSync(webmPath, out);
+    return { bytes: out.length };
+  }
+}
+
+function setup(vadDbfs = -50, encoder: Pick<WebmEncoder, 'encode'> = new FakeEncoder()): Harness {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'twinmind-orch-'));
   const db = new Database(':memory:');
   prepareDatabase(db, MIGRATIONS);
   const clock = new FakeClock(1_700_000_000_000);
   const store = new JobStore(db, clock);
-  const writer = new ChunkWriter(store, clock, dir, { silenceThresholdDbfs: vadDbfs });
+  const writer = new ChunkWriter(
+    store,
+    clock,
+    dir,
+    { silenceThresholdDbfs: vadDbfs },
+    encoder,
+  );
   const link = new InMemoryAudioLink();
   const orchestrator = new RecordingOrchestrator({
     store,
@@ -92,7 +115,7 @@ describe('RecordingOrchestrator — dictation happy path', () => {
     expect(h.orchestrator.state).toBe('recording');
   });
 
-  it('stop persists the chunk as captured and ends the session', () => {
+  it('stop persists the chunk as captured and ends the session', async () => {
     const sessionId = h.orchestrator.startDictation();
     const openMsg = h.link.outbound.find((m) => m.type === 'open_chunk') as
       | { chunkId: string }
@@ -104,10 +127,13 @@ describe('RecordingOrchestrator — dictation happy path', () => {
     h.orchestrator.stop();
     // audio-process responds with chunk_closed after close_chunk; deliver it.
     h.link.deliverFromAudio({ type: 'chunk_closed', chunkId, bytesWritten: 0, sumSquares, sampleCount });
+    // closeChunk is async (encodes pcm → webm); wait for it to settle.
+    await h.orchestrator.drainPendingChunkCloses();
 
     const chunks = h.store.listChunksForSession(sessionId);
     expect(chunks).toHaveLength(1);
     expect(chunks[0]!.state).toBe('captured');
+    expect(chunks[0]!.file_path.endsWith('.webm')).toBe(true);
     expect(h.store.getSession(sessionId)!.status).toBe('ended');
   });
 });
@@ -138,7 +164,7 @@ describe('RecordingOrchestrator — meeting chunk rotation', () => {
     expect(open!.startMs).toBe(28_000);
   });
 
-  it('chunk_closed for a voiced chunk persists state=captured', () => {
+  it('chunk_closed for a voiced chunk persists state=captured', async () => {
     const sessionId = h.orchestrator.startMeeting();
     const openMsg = h.link.outbound.find((m) => m.type === 'open_chunk') as
       | { chunkId: string }
@@ -148,21 +174,23 @@ describe('RecordingOrchestrator — meeting chunk rotation', () => {
     const { sumSquares, sampleCount } = pretendAudioProcessSendsVoicedChunk(h.link, chunkId);
     h.orchestrator.tickRotation();
     h.link.deliverFromAudio({ type: 'chunk_closed', chunkId, bytesWritten: 0, sumSquares, sampleCount });
+    await h.orchestrator.drainPendingChunkCloses();
 
     const chunks = h.store.listChunksForSession(sessionId);
     expect(chunks).toHaveLength(1);
     expect(chunks[0]!.state).toBe('captured');
     expect(chunks[0]!.source).toBe('mixed');
+    expect(chunks[0]!.file_path.endsWith('.webm')).toBe(true);
   });
 
-  it('silent chunk takes the VAD-skip path → state=completed with empty transcript', () => {
+  it('silent chunk takes the VAD-skip path → state=completed with empty transcript', async () => {
     const sessionId = h.orchestrator.startMeeting();
     const openMsg = h.link.outbound.find((m) => m.type === 'open_chunk') as
       | { chunkId: string }
       | undefined;
     const chunkId = openMsg!.chunkId;
 
-    // Push frames of silence so the WAV has bytes; then deliver chunk_closed
+    // Push frames of silence so the PCM has bytes; then deliver chunk_closed
     // with sumSquares=0 to force VAD-skip.
     for (let i = 0; i < 5; i++) {
       h.link.deliverFromAudio({
@@ -181,35 +209,44 @@ describe('RecordingOrchestrator — meeting chunk rotation', () => {
       sumSquares: 0,
       sampleCount: 5 * 1_600,
     });
+    await h.orchestrator.drainPendingChunkCloses();
 
     const chunks = h.store.listChunksForSession(sessionId);
     expect(chunks[0]!.state).toBe('completed');
     const t = h.store.getTranscript(chunks[0]!.id)!;
     expect(t.provider).toBe('local_vad');
     expect(t.text).toBe('');
-    // WAV file was deleted on the VAD-skip path.
+    // PCM was deleted on the VAD-skip path; no .webm written.
     expect(fs.existsSync(chunks[0]!.file_path)).toBe(false);
   });
 
-  it('produces a sensible WAV file (44-byte header + PCM body) for captured chunks', () => {
+  it('produces a WebM file (EBML magic header) for captured chunks', async () => {
     h.orchestrator.startMeeting();
     const openMsg = h.link.outbound.find((m) => m.type === 'open_chunk') as
       | { chunkId: string }
       | undefined;
     const chunkId = openMsg!.chunkId;
 
-    const { sumSquares, sampleCount, bytes } = pretendAudioProcessSendsVoicedChunk(
+    const { sumSquares, sampleCount } = pretendAudioProcessSendsVoicedChunk(
       h.link,
       chunkId,
       5,
     );
     h.orchestrator.tickRotation();
-    h.link.deliverFromAudio({ type: 'chunk_closed', chunkId, bytesWritten: bytes, sumSquares, sampleCount });
+    h.link.deliverFromAudio({ type: 'chunk_closed', chunkId, bytesWritten: 0, sumSquares, sampleCount });
+    await h.orchestrator.drainPendingChunkCloses();
 
     const chunkRow = h.store.listChunksForSession(h.orchestrator.currentSessionId!)[0]!;
+    expect(chunkRow.file_path.endsWith('.webm')).toBe(true);
     const file = fs.readFileSync(chunkRow.file_path);
-    expect(file.length).toBe(44 + bytes);
-    expect(file.toString('ascii', 0, 4)).toBe('RIFF');
+    // EBML magic — present in any WebM/Matroska container (real or our fake encoder).
+    expect(file[0]).toBe(0x1a);
+    expect(file[1]).toBe(0x45);
+    expect(file[2]).toBe(0xdf);
+    expect(file[3]).toBe(0xa3);
+    expect(chunkRow.bytes).toBe(file.length);
+    // PCM intermediate has been unlinked.
+    expect(fs.existsSync(chunkRow.file_path.replace(/\.webm$/, '.pcm'))).toBe(false);
   });
 });
 

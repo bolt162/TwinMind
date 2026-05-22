@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, Radio, RotateCw, History, X, Home } from 'lucide-react';
+import { Clock, Mic, MicOff, Radio, RotateCw, History, X, Home } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 type RecordingState = 'idle' | 'starting' | 'recording' | 'stopping';
@@ -24,7 +24,8 @@ type RecordingMode = 'idle' | 'dictation' | 'meeting';
 type TranscriptionUiState =
   | { kind: 'idle' }
   | { kind: 'processing' }
-  | { kind: 'failed'; sessionId: string };
+  | { kind: 'failed'; sessionId: string }
+  | { kind: 'dictation_limit_reached'; sessionId: string };
 
 const BAR_COUNT = 20;
 const DECAY = 0.86;
@@ -287,26 +288,30 @@ export function HudApp() {
     | 'recording'
     | 'processing'
     | 'failed'
+    | 'dictationLimit'
     | 'disconnected'
     | 'hoverIdle'
     | 'busy'
     | 'idle';
-  // disconnected takes priority — it means an active session is sitting
-  // paused with a pinned mic that vanished, waiting for the user to pick a
-  // replacement. Surface it over every other state except an active rebind.
-  const visual: Visual = deviceLost && !isRecording
-    ? 'disconnected'
-    : isRecording
-      ? 'recording'
-      : isBusy
-        ? 'busy'
-        : txState.kind === 'processing'
-          ? 'processing'
-          : txState.kind === 'failed'
-            ? 'failed'
-            : hovered
-              ? 'hoverIdle'
-              : 'idle';
+  // dictationLimit + disconnected are highest priority — both render a
+  // banner the user has to acknowledge before doing anything else.
+  // dictationLimit wins over recording because the orchestrator already
+  // stopped the session when it fired the limit.
+  const visual: Visual = txState.kind === 'dictation_limit_reached'
+    ? 'dictationLimit'
+    : deviceLost && !isRecording
+      ? 'disconnected'
+      : isRecording
+        ? 'recording'
+        : isBusy
+          ? 'busy'
+          : txState.kind === 'processing'
+            ? 'processing'
+            : txState.kind === 'failed'
+              ? 'failed'
+              : hovered
+                ? 'hoverIdle'
+                : 'idle';
   const expanded = visual !== 'idle';
 
   // Notify main of the current visual state. Main uses this to decide
@@ -418,7 +423,9 @@ export function HudApp() {
                 ? 'Retrying transcription'
                 : visual === 'disconnected'
                   ? 'Microphone disconnected; pick a device to resume'
-                  : 'Start dictation'
+                  : visual === 'dictationLimit'
+                    ? 'Dictation limit reached; dismiss or start a new dictation'
+                    : 'Start dictation'
         }
         className={[
           'flex items-center gap-1.5 rounded-full',
@@ -431,7 +438,7 @@ export function HudApp() {
           // hit-detectable (so the HUD's hover-reveal still works), but the
           // click handler short-circuits via `pillDisabled` above.
           pillDisabled ? 'opacity-40 cursor-not-allowed' : '',
-          visual === 'failed' || visual === 'disconnected'
+          visual === 'failed' || visual === 'disconnected' || visual === 'dictationLimit'
             ? 'px-6 py-4 items-stretch'
             : expanded
               ? 'px-3'
@@ -501,6 +508,9 @@ export function HudApp() {
           <FailedBanner
             sessionId={(txState as { kind: 'failed'; sessionId: string }).sessionId}
           />
+        )}
+        {visual === 'dictationLimit' && (
+          <DictationLimitBanner />
         )}
         {visual === 'disconnected' && deviceLost && (
           <DisconnectedBanner
@@ -698,6 +708,7 @@ type PillVisual =
   | 'recording'
   | 'processing'
   | 'failed'
+  | 'dictationLimit'
   | 'disconnected'
   | 'hoverIdle'
   | 'busy'
@@ -722,6 +733,8 @@ function pillWidth(v: PillVisual): number {
       return 400;
     case 'disconnected':
       return 400;
+    case 'dictationLimit':
+      return 400;
   }
 }
 
@@ -739,7 +752,7 @@ function hoverIdleWidth(label: string): number {
 }
 
 function pillHeight(v: PillVisual): number {
-  if (v === 'failed' || v === 'disconnected') return PILL_HEIGHT_FAILED;
+  if (v === 'failed' || v === 'disconnected' || v === 'dictationLimit') return PILL_HEIGHT_FAILED;
   if (v === 'idle') return PILL_HEIGHT_IDLE;
   return PILL_HEIGHT_EXPANDED;
 }
@@ -883,6 +896,87 @@ function FailedBanner({ sessionId }: { sessionId: string }) {
         >
           <RotateCw className={`h-3.5 w-3.5 ${retrying ? 'animate-spin' : ''}`} />
           Retry
+        </button>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Dictation-limit banner: shown when the 5-minute dictation hard cap
+ * fires. Same dimensions as FailedBanner. Two buttons in the right column:
+ *
+ *   Dismiss  — clears the limit state (REC_DICTATION_LIMIT_DISMISS).
+ *              HUD returns to whatever underlying state is live: 'processing'
+ *              if the just-stopped session's chunks are still uploading,
+ *              else 'idle'. Either way the old transcripts continue to land
+ *              and paste in the background.
+ *   Dictate  — dismisses + starts a fresh dictation session.
+ *
+ * Visual mirrors FailedBanner exactly so the user reads "this is a prompt"
+ * the same way they do for transcription failure.
+ */
+function DictationLimitBanner() {
+  const [busy, setBusy] = useState(false);
+  const onDismiss: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    void window.electronAPI.recording
+      .dictationLimitDismiss()
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+  const onDictate: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    // Order matters: startDictation FIRST, then dismiss the banner state.
+    // While state is 'dictation_limit_reached', `isBlockingNewRecording`
+    // returns false (it only blocks on 'processing'); the just-stopped
+    // dictation's chunk is still uploading in the background but that
+    // shouldn't gate a fresh start triggered explicitly by the banner.
+    // Dismissing first would flip the state to 'processing' and the
+    // startDictation IPC would no-op silently.
+    void window.electronAPI.recording
+      .startDictation()
+      .then(() => window.electronAPI.recording.dictationLimitDismiss())
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+  return (
+    <span className="flex h-full w-full items-center justify-center gap-2">
+      <span className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+        <span className="flex items-center gap-2">
+          <Clock className="h-4 w-4 shrink-0 text-white/80" strokeWidth={2.25} />
+          <span className="font-serif text-[16px] font-semibold leading-tight text-white">
+            Dictation limit reached
+          </span>
+        </span>
+        <span
+          className="block text-left text-[13px] leading-snug text-white/75"
+          style={{ paddingLeft: 24, textWrap: 'balance' }}
+        >
+          Start new dictation?
+        </span>
+      </span>
+      <span className="flex shrink-0 flex-col justify-center gap-1.5">
+        <button
+          type="button"
+          onClick={onDismiss}
+          disabled={busy}
+          className="flex w-20 items-center justify-center gap-1 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[12px] font-medium text-white/85 hover:bg-white/10 disabled:opacity-60"
+        >
+          Dismiss
+        </button>
+        <button
+          type="button"
+          onClick={onDictate}
+          disabled={busy}
+          className="flex w-20 items-center justify-center gap-1 rounded-md border border-amber-700/70 bg-amber-900/40 px-2 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-60"
+        >
+          <Mic className="h-3.5 w-3.5" />
+          Dictate
         </button>
       </span>
     </span>

@@ -705,6 +705,13 @@ function wireIpc(b: IpcBridgeMain): void {
     if (c.orchestrator.currentSessionId === sessionId) c.orchestrator.stop();
     return {};
   });
+  b.handle(REQUEST.REC_DICTATION_LIMIT_DISMISS, () => {
+    // Fired by both the Dismiss and Dictate buttons on the HUD's 5-min
+    // limit banner. Just clears the banner state; the Dictate button
+    // separately invokes REC_START_DICTATION right after.
+    composedBindings?.transcriptionUx.onDictationLimitDismissed();
+    return {};
+  });
   b.handle(REQUEST.REC_RESUME_FROM_DEVICE_LOSS, ({ sessionId, deviceId }) => {
     const c = requireComposed();
     const current = c.settings.load().settings;
@@ -1083,6 +1090,15 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
     });
   }
 
+  // ─── Dictation 5-min cap → HUD banner ────────────────────────────────────
+  // Orchestrator fires this when its setTimeout(DICTATION_HARD_CAP_MS)
+  // expires. We just route the sessionId into TranscriptionUx; that
+  // state-machine flip pushes TRANSCRIPTION_UI_STATE to the HUD which
+  // renders the DictationLimitBanner.
+  c.orchestrator.onDictationLimitReached(({ sessionId }) => {
+    transcriptionUx.onDictationLimitReached(sessionId);
+  });
+
   // ─── Device-lost broadcast ───────────────────────────────────────────────
   c.orchestrator.onDeviceLost(({ sessionId, mode, reason }) => {
     let devices: ReadonlyArray<{
@@ -1131,6 +1147,21 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
     segment: { text: string };
   }) => {
     transcriptionUx.onChunkCompleted(e.chunkId);
+    // Auto-fire summary on every chunk completion. fireSummary is idempotent
+    // (guards: already_pending, already_completed, chunks_in_flight,
+    // no_transcript_text), so it only does work on the last in-flight chunk
+    // — same effective semantics as TranscriptionUx.onSessionProcessed.
+    //
+    // Why this is needed in addition to onSessionProcessed: that path only
+    // fires for sessions in `processingSessions`, which is populated only by
+    // the live-recording stop path. Crash-recovered sessions — whose orphan
+    // PCM was re-encoded on launch and whose chunks transcribe AFTER startup
+    // — never enter processingSessions, so before this hook, their summary
+    // never fired automatically (had to be clicked manually). The
+    // post-recovery startup scan in swapComposedTo only catches sessions
+    // whose transcripts already exist; recovered-then-transcribed needs
+    // this per-chunk hook to land.
+    void fireSummary(e.sessionId);
     if (e.segment.text.trim() === '') return;
     const chunk = c.jobStore.getChunk(e.chunkId);
     if (!chunk) return;
@@ -1233,7 +1264,7 @@ async function swapComposedTo(userId: string | null): Promise<void> {
     composed = null;
   }
   if (userId !== null) {
-    composed = s.composeForUser(userId);
+    composed = await s.composeForUser(userId);
     composedBindings = attachComposedBindings(composed, s);
     if (composed.meetingDetection) {
       micMonitorStatus.serviceStarted = true;

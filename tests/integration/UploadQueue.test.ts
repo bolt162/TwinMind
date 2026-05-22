@@ -29,7 +29,7 @@ function setup(): Harness {
     dir,
     store,
     clock,
-    audioPath: (id) => path.join(dir, `${id}.mixed.wav`),
+    audioPath: (id) => path.join(dir, `${id}.mixed.webm`),
   };
 }
 

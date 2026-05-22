@@ -46,6 +46,9 @@ export function SessionDetail({ sessionId, onClose }: Props) {
           items={data.transcripts}
           mode={data.mode}
           sessionStartedAt={data.startedAt}
+          sessionId={data.id}
+          sessionStatus={data.status}
+          summaryStatus={data.summaryStatus}
         />
       )}
     </div>
@@ -82,9 +85,6 @@ function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSessio
             )}
             {data.status === 'paused_by_sleep' && <span>· paused by sleep</span>}
             {data.status === 'paused_by_device_loss' && <span>· paused (mic disconnected)</span>}
-            {data.mode === 'meeting' && data.status === 'ended' && (
-              <SummaryButton sessionId={data.id} status={data.summaryStatus} />
-            )}
           </div>
         </div>
       </div>
@@ -93,10 +93,13 @@ function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSessio
 }
 
 /**
- * Per-meeting summary affordance shown next to the date/time row.
+ * Per-meeting summary affordance. Lives in the transcript header alongside
+ * the Copy button so the two actions share a visual row.
  *
  *   completed → "View Summary" — opens `${TWINMIND_APP_URL}/m/${sessionId}`
  *               externally via the host-validated MISC_OPEN_EXTERNAL_URL IPC.
+ *               Always enabled (user can re-open the link even if the
+ *               transcript was wiped client-side).
  *   pending   → "Generating summary…" (disabled). The summary call is in
  *               flight; useSession will reload on the next push.
  *   failed    → "Generate summary" — clicking re-fires the request via
@@ -104,22 +107,32 @@ function SessionHeader({ data }: { data: NonNullable<ReturnType<typeof useSessio
  *   null      → "Generate summary" — auto-trigger hasn't fired yet (e.g.
  *               chunks still landing). Clicking fires it manually.
  *
+ * `hasText` disables Generate — same gate as the Copy button — because
+ * the backend rejects empty-transcript summary requests with a 500.
+ *
  * For a dictation session this component never mounts (the caller gates it).
  */
 function SummaryButton({
   sessionId,
   status,
+  hasText,
 }: {
   sessionId: string;
   status: 'pending' | 'completed' | 'failed' | null;
+  hasText: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isCompleted = status === 'completed';
+  const isPending = status === 'pending';
+  // Generate requires transcript text; View has no such requirement.
+  const disabled = isPending || busy || (!isCompleted && !hasText);
+
   const handleClick = async () => {
-    if (busy) return;
+    if (disabled) return;
     setError(null);
-    if (status === 'completed') {
+    if (isCompleted) {
       // Main builds the deep link from the configured TWINMIND_APP_URL +
       // session id, then opens it externally. The renderer never crafts a
       // URL the user could be tricked into following.
@@ -141,8 +154,6 @@ function SummaryButton({
     }
   };
 
-  const isCompleted = status === 'completed';
-  const isPending = status === 'pending';
   const label = isPending
     ? 'Generating summary…'
     : isCompleted
@@ -154,12 +165,10 @@ function SummaryButton({
       <button
         type="button"
         onClick={handleClick}
-        disabled={isPending || busy}
-        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition ${
-          isCompleted
-            ? 'border-emerald-800/60 bg-emerald-950/30 text-emerald-300 hover:border-emerald-700 hover:bg-emerald-900/40'
-            : 'border-zinc-700 bg-zinc-800/50 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50'
-        }`}
+        disabled={disabled}
+        className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[11px] text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-zinc-800/50"
+        aria-label={label}
+        title={label}
       >
         {isCompleted ? <ExternalLink className="h-3 w-3" /> : <Sparkles className="h-3 w-3" />}
         <span>{label}</span>
@@ -268,6 +277,9 @@ function TranscriptList({
   items,
   mode,
   sessionStartedAt,
+  sessionId,
+  sessionStatus,
+  summaryStatus,
 }: {
   items: ReadonlyArray<{
     chunkId: string;
@@ -278,7 +290,18 @@ function TranscriptList({
   }>;
   mode: 'dictation' | 'meeting';
   sessionStartedAt: number;
+  sessionId: string;
+  sessionStatus: 'active' | 'ended' | 'paused_by_sleep' | 'paused_by_device_loss';
+  summaryStatus: 'pending' | 'completed' | 'failed' | null;
 }) {
+  // Single source of truth for "is there any transcript text?" — drives the
+  // Copy button's disabled state AND the Generate-summary disabled state.
+  const hasText = items.some((t) => t.text.trim().length > 0);
+  // Show the summary button only for ended meetings (matches the previous
+  // SessionHeader gate). Active / paused meetings hide it because the
+  // summary call requires a final transcript.
+  const showSummary = mode === 'meeting' && sessionStatus === 'ended';
+
   if (items.length === 0) {
     return (
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-400">
@@ -289,11 +312,24 @@ function TranscriptList({
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
       {mode === 'meeting' && (
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between gap-2">
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
             Transcript
           </span>
-          <CopyMeetingTranscriptButton items={items} sessionStartedAt={sessionStartedAt} />
+          <div className="flex items-center gap-2">
+            <CopyMeetingTranscriptButton
+              items={items}
+              sessionStartedAt={sessionStartedAt}
+              hasText={hasText}
+            />
+            {showSummary && (
+              <SummaryButton
+                sessionId={sessionId}
+                status={summaryStatus}
+                hasText={hasText}
+              />
+            )}
+          </div>
         </div>
       )}
       <ol className="space-y-2">
@@ -338,6 +374,7 @@ function TranscriptList({
 function CopyMeetingTranscriptButton({
   items,
   sessionStartedAt,
+  hasText,
 }: {
   items: ReadonlyArray<{
     startMs: number;
@@ -345,6 +382,7 @@ function CopyMeetingTranscriptButton({
     text: string;
   }>;
   sessionStartedAt: number;
+  hasText: boolean;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -355,7 +393,6 @@ function CopyMeetingTranscriptButton({
       return `[${hhmm}] ${t.text.trim()}`;
     })
     .join('\n\n');
-  const hasText = text.length > 0;
 
   const handleCopy = async () => {
     if (!hasText) return;

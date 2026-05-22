@@ -4,7 +4,7 @@ import { AsrError } from '@core/asr/AsrError';
 import type { TranscribeRequest } from '@core/asr/IAsrClient';
 
 const req: TranscribeRequest = {
-  audioPath: '/tmp/nope.wav',
+  audioPath: '/tmp/nope.webm',
   sessionId: 's1',
   mode: 'meeting',
   source: 'mixed',

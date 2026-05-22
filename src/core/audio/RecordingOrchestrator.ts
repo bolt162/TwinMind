@@ -30,7 +30,7 @@ import { EventEmitter } from 'node:events';
 
 import type { ChunkWriter } from './ChunkWriter';
 import type { ModeBehavior } from './modes/ModeBehavior';
-import { DictationModeBehavior } from './modes/DictationModeBehavior';
+import { DictationModeBehavior, DICTATION_HARD_CAP_MS } from './modes/DictationModeBehavior';
 import { MeetingModeBehavior } from './modes/MeetingModeBehavior';
 import type { AudioProcessLink } from './AudioProcessLink';
 import type { JobStore } from '@core/storage/JobStore';
@@ -93,6 +93,22 @@ export class RecordingOrchestrator {
   private stateInternal: OrchestratorState = 'idle';
   private active: ActiveSession | null = null;
   private readonly emitter = new EventEmitter();
+  /**
+   * In-flight closeChunk promises. Tracked so `drainPendingChunkCloses` can
+   * await them — used by tests (to observe the encode-and-persist outcome)
+   * and by app shutdown (so we don't tear down a process while ffmpeg is
+   * still writing a `.webm`). Each entry self-removes from the set when it
+   * settles.
+   */
+  private readonly pendingCloses = new Set<Promise<unknown>>();
+  /**
+   * Wall-clock timer that fires when a dictation session reaches the hard
+   * cap (DICTATION_HARD_CAP_MS = 5 min). On fire we emit
+   * `'dictation_limit_reached'` and call `stop('dictation_limit')`. Cleared
+   * whenever a session ends/pauses/cancels by any other path so we don't
+   * fire a stale callback against the next session.
+   */
+  private dictationLimitTimer: NodeJS.Timeout | null = null;
   /**
    * Set by mic_rebound; consumed by the next beginChunk so the chunk row is
    * stamped with device_boundary=true. Cleared after use. Persists across
@@ -180,6 +196,9 @@ export class RecordingOrchestrator {
   /** Stop the active session. Closes the current chunk, ends the session. */
   stop(reason: string = 'user'): void {
     if (!this.active || this.stateInternal === 'stopping') return;
+    // Cancel the dictation cap timer if it's pending — anything that ends
+    // the session naturally (user stop, force_cap, etc.) supersedes the cap.
+    this.clearDictationLimit();
     const elapsed = this.clock.now() - this.active.startedAt;
     // Phantom-cancel path: the user released the hotkey so fast that there's
     // effectively no recording. Don't persist anything — delete the session
@@ -224,6 +243,7 @@ export class RecordingOrchestrator {
    */
   private cancelPhantom(elapsedMs: number): void {
     if (!this.active) return;
+    this.clearDictationLimit();
     const a = this.active;
     this.setState('stopping');
     // Tear down audio-process capture; no close_chunk because we're discarding
@@ -250,6 +270,7 @@ export class RecordingOrchestrator {
    */
   pauseForSleep(): string | null {
     if (!this.active || this.stateInternal !== 'recording') return null;
+    this.clearDictationLimit();
     this.setState('stopping');
     const a = this.active;
 
@@ -280,6 +301,7 @@ export class RecordingOrchestrator {
    */
   pauseForDeviceLoss(reason: string = 'device_disappeared'): string | null {
     if (!this.active || this.stateInternal !== 'recording') return null;
+    this.clearDictationLimit();
     this.setState('stopping');
     const a = this.active;
 
@@ -531,7 +553,45 @@ export class RecordingOrchestrator {
     };
     this.setState('recording');
     this.logger.info('session started', { sessionId, mode });
+
+    // Dictation hard cap: schedule a wall-clock timer. On fire we emit
+    // `dictation_limit_reached` (HUD picks it up) and call stop() with a
+    // distinct reason. Meeting mode doesn't get a cap — meetings are
+    // expected to run for arbitrarily long durations.
+    if (mode === 'dictation') this.scheduleDictationLimit(sessionId);
     return sessionId;
+  }
+
+  /**
+   * Schedule the dictation 5-min cap. Stores the handle so it can be
+   * cleared on any other stop path before firing. Always called only from
+   * `startSession` with mode='dictation' — safe to assume `this.active`
+   * matches `sessionId` at fire time IFF the session hasn't been stopped
+   * by something else (we recheck because a cancel between schedule and
+   * fire is a race we have to tolerate).
+   */
+  private scheduleDictationLimit(sessionId: string): void {
+    this.clearDictationLimit();
+    this.dictationLimitTimer = setTimeout(() => {
+      this.dictationLimitTimer = null;
+      if (!this.active || this.active.sessionId !== sessionId) return;
+      this.logger.info('dictation limit reached', { sessionId });
+      this.emitter.emit('dictation_limit_reached', { sessionId });
+      this.stop('dictation_limit');
+    }, DICTATION_HARD_CAP_MS);
+  }
+
+  /** Cancel the dictation cap timer (idempotent). Called from every stop path. */
+  private clearDictationLimit(): void {
+    if (this.dictationLimitTimer !== null) {
+      clearTimeout(this.dictationLimitTimer);
+      this.dictationLimitTimer = null;
+    }
+  }
+
+  /** Subscribe to the dictation 5-min cap firing. main.ts wires this to TranscriptionUx. */
+  onDictationLimitReached(cb: (e: { sessionId: string }) => void): void {
+    this.emitter.on('dictation_limit_reached', cb);
   }
 
   /**
@@ -592,12 +652,36 @@ export class RecordingOrchestrator {
 
   /**
    * Forward to ChunkWriter, which knows per-chunk metadata (start_ms etc.)
-   * from `beginChunk` and computes `end_ms` from the WAV's own duration. This
-   * intentionally does NOT check `this.active`: a chunk_closed can legitimately
-   * arrive after stop() (the audio-process drains its mixer before tearing
-   * down), and we still want to finalize that chunk.
+   * from `beginChunk` and derives `end_ms` from the audio-process's
+   * authoritative sampleCount. This intentionally does NOT check `this.active`:
+   * a chunk_closed can legitimately arrive after stop() (the audio-process
+   * drains its mixer before tearing down), and we still want to finalize.
+   *
+   * Fire-and-forget: closeChunk is async because it spawns ffmpeg to encode
+   * the chunk's `.pcm` → `.webm`. We don't block the audio-message dispatch
+   * loop on the encode; failures inside closeChunk leave the `.pcm` for
+   * RecoveryService to pick up on next launch (same path as a crash).
    */
   private onChunkClosed(chunkId: string, sumSquares: number, sampleCount: number): void {
-    this.chunkWriter.closeChunk({ chunkId, sumSquares, sampleCount });
+    const p = this.chunkWriter.closeChunk({ chunkId, sumSquares, sampleCount }).catch((err) => {
+      this.logger.error('chunkWriter.closeChunk threw', {
+        chunkId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+    this.pendingCloses.add(p);
+    p.finally(() => this.pendingCloses.delete(p)).catch(() => {});
+  }
+
+  /**
+   * Resolve when every in-flight `closeChunk` (encode + DB persist) has
+   * settled. Called from app shutdown so we never tear down while ffmpeg
+   * is mid-encode (would leave a half-written `.webm`). Also used by tests
+   * to observe post-encode state without polling.
+   */
+  async drainPendingChunkCloses(): Promise<void> {
+    while (this.pendingCloses.size > 0) {
+      await Promise.allSettled([...this.pendingCloses]);
+    }
   }
 }

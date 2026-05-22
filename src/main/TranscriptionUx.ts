@@ -76,11 +76,20 @@ export class TranscriptionUx {
   private readonly processingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * How long to wait after a recording stops before force-draining the
-   * processing state. Generous: normal completion is sub-second for
-   * VAD-skipped chunks, a few seconds for short uploads. 10s flags real
-   * stuck cases without false-positives on slow networks.
+   * processing state. Set generously to 30 s so that slow networks /
+   * backend latency don't race the watchdog and silently veto the paste
+   * path — when the watchdog drains `processingSessions` before
+   * chunk_completed arrives, `maybeFinishSession`'s gate short-circuits
+   * and `onSessionProcessed` (the trigger for dictation paste + meeting
+   * summary) never fires. QA on a MacBook Air was hitting this at
+   * 10 s. 30 s leaves room for genuinely slow uploads while still
+   * catching real stuck-state bugs in a bounded window.
+   *
+   * If we ever see this fire on a real network again, the proper fix is
+   * to separate the HUD-spinner state from the "owe a callback" state
+   * (see WIP design notes — they share `processingSessions` today).
    */
-  private static readonly PROCESSING_WATCHDOG_MS = 10_000;
+  private static readonly PROCESSING_WATCHDOG_MS = 30_000;
   /**
    * Sessions whose total wall-clock duration is below this threshold are
    * treated as phantoms — typically a too-quick hotkey release where the
@@ -97,6 +106,16 @@ export class TranscriptionUx {
    *   • the user dismissing the HUD via the History button.
    */
   private currentFailedSessionId: string | null = null;
+  /**
+   * Set when the dictation 5-min hard cap fires (RecordingOrchestrator emits
+   * `dictation_limit_reached`). Holds the sessionId that was force-stopped
+   * so the HUD banner can reference it. Cleared by Dismiss or Dictate —
+   * both come in through onDictationLimitDismissed. Highest visual priority
+   * in `recompute()` so the prompt is unmissable (overrides 'processing'
+   * even though the just-stopped session's chunks may still be uploading
+   * in the background; those continue and paste when done).
+   */
+  private dictationLimitSessionId: string | null = null;
 
   constructor(private readonly deps: TranscriptionUxDeps) {}
 
@@ -230,6 +249,26 @@ export class TranscriptionUx {
   }
 
   /**
+   * Called from main.ts when RecordingOrchestrator emits
+   * `dictation_limit_reached` (the 5-min cap fired). Sets the HUD to the
+   * highest-priority banner state so the user sees the prompt immediately.
+   */
+  onDictationLimitReached(sessionId: string): void {
+    this.dictationLimitSessionId = sessionId;
+    this.recompute();
+  }
+
+  /**
+   * Called by the Dismiss or Dictate button (REC_DICTATION_LIMIT_DISMISS).
+   * Clears the limit banner; recompute lands on whatever underlying state
+   * is still true (processing if chunks still in flight, idle otherwise).
+   */
+  onDictationLimitDismissed(): void {
+    this.dictationLimitSessionId = null;
+    this.recompute();
+  }
+
+  /**
    * Called from the SESSION_RETRY_FAILED IPC handler AFTER the JobStore
    * reset. `chunkIds` is the list of chunks that were just reset to
    * `captured` — we track them so the 'retrying' state ends exactly when
@@ -256,11 +295,21 @@ export class TranscriptionUx {
    * anywhere", so past failures from previous runs stay invisible to the HUD
    * (they're still accessible via the Sessions tab).
    *
+   *   dictationLimitSessionId set                          → 'dictation_limit_reached'
    *   retryBatch OR processingSessions non-empty           → 'processing'
    *   currentFailedSessionId set + still has failures      → 'failed' for it
    *   otherwise                                            → 'idle'
+   *
+   * `dictation_limit_reached` outranks `processing` deliberately: the
+   * prompt needs to be unmissable. Background chunk-completion of the
+   * just-stopped session keeps running and pastes on the existing path
+   * when ready, regardless of the banner being up.
    */
   private recompute(): void {
+    if (this.dictationLimitSessionId !== null) {
+      this.setState({ kind: 'dictation_limit_reached', sessionId: this.dictationLimitSessionId });
+      return;
+    }
     if (this.retryBatch.size > 0 || this.processingSessions.size > 0) {
       this.setState({ kind: 'processing' });
       return;
@@ -338,5 +387,8 @@ export class TranscriptionUx {
 function statesEqual(a: TranscriptionUiState, b: TranscriptionUiState): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind === 'failed' && b.kind === 'failed') return a.sessionId === b.sessionId;
+  if (a.kind === 'dictation_limit_reached' && b.kind === 'dictation_limit_reached') {
+    return a.sessionId === b.sessionId;
+  }
   return true;
 }

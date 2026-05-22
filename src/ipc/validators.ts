@@ -76,6 +76,10 @@ const transcriptionUiState = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('idle') }),
   z.object({ kind: z.literal('processing') }),
   z.object({ kind: z.literal('failed'), sessionId: z.string().min(1).max(64) }),
+  z.object({
+    kind: z.literal('dictation_limit_reached'),
+    sessionId: z.string().min(1).max(64),
+  }),
 ]);
 
 const navigateTab = z.object({
@@ -357,6 +361,7 @@ const hudSetVisualStateInput = z.object({
     'recording',
     'processing',
     'failed',
+    'dictationLimit',
     'disconnected',
   ]),
 });
@@ -414,6 +419,7 @@ export const RequestSchemas = {
   [REQUEST.WIZARD_COMPLETE]: { input: empty, output: empty },
   [REQUEST.SESSION_RETRY_SUMMARY]: { input: sessionRetrySummaryInput, output: empty },
   [REQUEST.SESSION_OPEN_SUMMARY]: { input: sessionOpenSummaryInput, output: empty },
+  [REQUEST.REC_DICTATION_LIMIT_DISMISS]: { input: empty, output: empty },
 } as const;
 
 export type RequestChannelName = keyof typeof RequestSchemas;

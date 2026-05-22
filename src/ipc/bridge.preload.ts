@@ -52,6 +52,7 @@ const electronAPI = {
       invoke(REQUEST.REC_START_MEETING, input),
     stopMeeting: (input: { sessionId: string }) =>
       invoke(REQUEST.REC_STOP_MEETING, input),
+    dictationLimitDismiss: () => invoke(REQUEST.REC_DICTATION_LIMIT_DISMISS, {}),
   },
   permissions: {
     requestMic: () => invoke(REQUEST.PERMISSIONS_REQUEST_MIC, {}),

@@ -11,10 +11,17 @@
  *   ✓ sessions.status='paused_by_sleep' > sleepTimeoutMs → end with reason='sleep_timeout'
  *   ✓ retention sweep: failed_permanent + file_deleted_at NULL + updated_at < threshold
  *
+ * Audio-file recovery (post-WAV→WebM migration):
+ *   - Orphan `.pcm`: in-flight at crash; encode to `.webm`, insert chunks row.
+ *   - Orphan `.webm`: encode succeeded but DB insert lost to a crash; probe
+ *     duration from the container and insert a chunks row.
+ *   - Legacy `.wav` shim: previous-build WAVs left over from before the
+ *     migration; re-encode to `.webm` so the upload queue can transcribe
+ *     them. Removed one release after migration ships.
+ *
  * Deferred (no evidence yet that these cases occur in practice — add when seen):
  *   - transcribed but no transcripts row (impossible if the success txn worked)
- *   - file exists, no row → reconstruct row from filename
- *   - WAV header truncated → rewrite RIFF length
+ *   - file exists, no row → reconstruct row from filename (handled per-extension below)
  *   - same chunk twice in DB and on disk
  *
  * Pure in spirit: takes the dependencies it needs and emits a report; no
@@ -22,18 +29,25 @@
  * at startup and schedules a daily retention sweep on top.
  */
 
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+
+import type { WebmEncoder } from '@core/audio/WebmEncoder';
+import { resolveFfmpegPath } from '@core/audio/WebmEncoder';
 import type { ChunkSource, JobStore } from '@core/storage/JobStore';
 import type { Clock } from '@core/util/Clock';
 import { type Logger, noopLogger } from '@core/observability/Logger';
 
-// WAV format constants — must match WavFileWriter (16 kHz mono int16). Kept
-// duplicated here rather than imported so RecoveryService doesn't drag in
-// the writer module just for two numbers.
-const WAV_HEADER_BYTES = 44;
-const WAV_BYTES_PER_SECOND = 16_000 * 1 * 2; // sample_rate * channels * bytes/sample
+// PCM format constants — must match audio-process capture (16 kHz mono int16).
+// Used to derive a `.pcm` file's duration from its byte count.
+const PCM_BYTES_PER_SECOND = 16_000 * 1 * 2; // sample_rate * channels * bytes/sample
 const VALID_CHUNK_SOURCES: readonly ChunkSource[] = ['mic', 'mixed'];
+
+// Legacy WAV constants — only used by the one-release shim that re-encodes
+// pre-migration `.wav` files. Remove this block when the shim retires.
+const LEGACY_WAV_HEADER_BYTES = 44;
+const LEGACY_WAV_BYTES_PER_SECOND = 16_000 * 1 * 2;
 
 export interface RecoveryOptions {
   /** §11.5: 'uploading' rows untouched longer than this → reset. Default 10 min. */
@@ -59,8 +73,7 @@ export interface RecoveryReport {
   /**
    * Sessions whose summary call was in flight (`summary_status='pending'`)
    * when the app last quit/crashed. Flipped to `'failed'` so the UI shows
-   * "Generate summary" (manual retry). The backend dedupes by meeting_id,
-   * so a re-fire is harmless even if it had already completed server-side.
+   * "Generate summary" (manual retry).
    */
   staleSummaryPending: number;
   /**
@@ -76,21 +89,35 @@ export interface RecoveryReport {
    */
   unresumedDeviceLoss: number;
   /**
-   * WAV files in `recordings/<sessionId>/` with no matching `chunks` row.
+   * `.pcm` files in `recordings/<sessionId>/` with no matching `chunks` row.
    * Happens when the app is force-quit mid-record before the in-flight
-   * chunk's `chunk_closed` reply arrives from the audio-process. The sweep
-   * fixes up the RIFF header (placeholder size fields → real sizes),
-   * inserts a `chunks` row as `captured`, and lets the UploadQueue
-   * transcribe it on next launch.
+   * chunk's `chunk_closed` reply arrives from the audio-process (or before
+   * `ChunkWriter.closeChunk` finished encoding). Recovery encodes them to
+   * `.webm` and inserts captured rows so the upload queue transcribes them.
    */
-  recoveredOrphanWavs: number;
+  recoveredOrphanPcms: number;
+  /**
+   * `.webm` files in `recordings/<sessionId>/` with no matching `chunks` row.
+   * Happens when ChunkWriter encoded successfully but a crash landed between
+   * the encode and the DB insert. Recovery probes duration via ffmpeg and
+   * inserts a captured row.
+   */
+  recoveredOrphanWebms: number;
+  /**
+   * Pre-migration `.wav` files left over from a build that wrote WAV chunks.
+   * Re-encoded to `.webm` and a captured row inserted. Remove the shim one
+   * release after the migration ships.
+   */
+  recoveredLegacyWavs: number;
 }
 
 export class RecoveryService {
   /**
    * Configure with the store, clock, and recovery thresholds.
-   * `recordingsDir` is required for the orphan-WAV sweep; pass `null` in
-   * unit tests that don't touch the filesystem to skip that step.
+   * `recordingsDir` is required for orphan-audio sweeps; pass `null` in unit
+   * tests that don't touch the filesystem. `encoder` is required when
+   * `recordingsDir` is non-null because orphan `.pcm` / legacy `.wav` are
+   * re-encoded to `.webm`; pass `null` to skip those passes in tests.
    */
   constructor(
     private readonly store: JobStore,
@@ -98,13 +125,16 @@ export class RecoveryService {
     private readonly recordingsDir: string | null,
     private readonly options: RecoveryOptions = DEFAULT_RECOVERY_OPTIONS,
     private readonly logger: Logger = noopLogger,
+    private readonly encoder: Pick<WebmEncoder, 'encode'> | null = null,
   ) {}
 
   /**
    * Run all enabled recovery passes in order; returns the count summary the
    * UI uses to show the "Recovered an interrupted recording" banner.
+   *
+   * Async because orphan-PCM and legacy-WAV recovery encode via ffmpeg.
    */
-  recover(): RecoveryReport {
+  async recover(): Promise<RecoveryReport> {
     const report: RecoveryReport = {
       staleSleepSessions: 0,
       resetUploading: 0,
@@ -114,18 +144,16 @@ export class RecoveryService {
       staleSummaryPending: 0,
       crashRecoveredActive: 0,
       unresumedDeviceLoss: 0,
-      recoveredOrphanWavs: 0,
+      recoveredOrphanPcms: 0,
+      recoveredOrphanWebms: 0,
+      recoveredLegacyWavs: 0,
     };
 
-    // 0. Crash recovery — runs FIRST so subsequent sweeps see consistent
-    //    session state. Sessions stuck in 'active' or 'paused_by_device_loss'
-    //    at startup are orphans from a prior process that crashed / was
-    //    force-quit. Both are force-ended with a distinct end_reason so they
-    //    stop showing the "live" / "paused (mic disconnected)" badge.
+    // 0. Crash recovery first so subsequent sweeps see consistent session state.
     report.crashRecoveredActive = this.store.autoEndCrashRecoveredActive();
     report.unresumedDeviceLoss = this.store.autoEndUnresumedDeviceLoss();
 
-    // 1. Sleep timeout — sessions that were paused by sleep too long ago auto-end.
+    // 1. Sleep timeout — sessions paused by sleep too long ago auto-end.
     report.staleSleepSessions = this.store.autoEndStaleSleepPaused(
       this.clock.now(),
       this.options.sleepTimeoutMs,
@@ -134,8 +162,7 @@ export class RecoveryService {
     // 2. Stuck uploading → captured so the queue picks them up again.
     report.resetUploading = this.store.resetStuckUploading(this.options.staleUploadingMs);
 
-    // 3. completed + file still present → delete file (the queue's post-commit
-    //    delete may have failed or never ran due to crash).
+    // 3. completed + file still present → delete file.
     for (const c of this.store.findCompletedRows()) {
       if (fileExists(c.file_path)) {
         tryUnlink(c.file_path);
@@ -144,9 +171,7 @@ export class RecoveryService {
     }
 
     // 4. Row points at a missing file and we haven't deleted it on purpose →
-    //    mark failed_permanent with reason='file_lost'. Note: 'completed' rows
-    //    that pass through case 3 above are already handled; we filter them out
-    //    via the JobStore.findChunksForFileCheck query.
+    //    mark failed_permanent with reason='file_lost'.
     for (const c of this.store.findChunksForFileCheck()) {
       if (!fileExists(c.file_path)) {
         this.store.markChunkFileLost(c.id);
@@ -154,8 +179,7 @@ export class RecoveryService {
       }
     }
 
-    // 5. Stale summary 'pending' → 'failed' so the UI shows "Generate summary".
-    //    Backend dedupes by meeting_id, so re-firing on user click is safe.
+    // 5. Stale summary 'pending' → 'failed'.
     report.staleSummaryPending = this.store.recoverStaleSummaryPending();
 
     // 6. Retention sweep: failed_permanent files aged past the horizon.
@@ -167,15 +191,11 @@ export class RecoveryService {
       report.retentionFilesDeleted++;
     }
 
-    // 7. Orphan-WAV sweep: WAV files in recordings/<sessionId>/ that have no
-    //    matching chunks row. Caused by force-quit (or kernel panic) before
-    //    the in-flight chunk's chunk_closed reply arrived — see
-    //    ChunkWriter.finalizeAllOnShutdown for the graceful path. Recovery
-    //    fixes the RIFF header, inserts a captured chunks row, and lets the
-    //    upload queue transcribe it. Skipped if no recordings dir was wired
-    //    (unit tests).
+    // 7. Orphan-audio sweep: walks recordings/<sessionId>/ once per session,
+    //    handles `.pcm` / `.webm` / `.wav` (legacy) for any file without a
+    //    matching chunks row. Sequential encoding keeps disk + CPU bounded.
     if (this.recordingsDir !== null) {
-      report.recoveredOrphanWavs = this.recoverOrphanWavFiles(this.recordingsDir);
+      await this.recoverOrphanAudioFiles(this.recordingsDir, report);
     }
 
     this.logger.info('recovery completed', { ...report });
@@ -183,23 +203,28 @@ export class RecoveryService {
   }
 
   /**
-   * Scan `recordings/<sessionId>/*.wav`; for any file without a chunks row,
-   * fix up the RIFF header and insert a captured chunks row. Idempotent:
-   * a second pass finds no orphans because the first inserted the rows.
-   *
-   * Files in directories whose session_id doesn't exist in the DB are left
-   * alone — they belong to a deleted session and should be cleaned by a
-   * separate cascade-delete path (not this sweep's job).
+   * Walk `recordings/<sessionId>/` and reconcile every orphan audio file
+   * (one without a matching chunks row). Sequential — encoding several
+   * orphans in parallel would burn CPU during a sensitive launch window.
+   * Each file lands in one of three buckets:
+   *   - `.pcm`  → encode to `.webm`, unlink `.pcm`, insert row
+   *   - `.webm` → probe duration, insert row
+   *   - `.wav`  → legacy: re-encode header-stripped PCM body to `.webm`,
+   *               unlink `.wav`, insert row (one-release shim)
+   * Anything else is left untouched.
    */
-  private recoverOrphanWavFiles(recordingsDir: string): number {
-    let recovered = 0;
+  private async recoverOrphanAudioFiles(
+    recordingsDir: string,
+    report: RecoveryReport,
+  ): Promise<void> {
     let sessionDirs: string[];
     try {
       sessionDirs = fs.readdirSync(recordingsDir);
     } catch {
       // recordings/ doesn't exist yet (fresh install, never recorded). Fine.
-      return 0;
+      return;
     }
+
     for (const sessionId of sessionDirs) {
       const sessionDir = path.join(recordingsDir, sessionId);
       let entries: fs.Dirent[];
@@ -221,50 +246,46 @@ export class RecoveryService {
       let lastEndMs = existing.reduce((acc, c) => Math.max(acc, c.end_ms), 0);
 
       for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith('.wav')) continue;
-        const parsed = parseChunkWavName(entry.name);
+        if (!entry.isFile()) continue;
+        const parsed = parseChunkAudioName(entry.name);
         if (!parsed) continue;
-        if (this.store.getChunk(parsed.chunkId)) continue; // not orphan
+        if (this.store.getChunk(parsed.chunkId)) continue; // already reconciled
 
         const filePath = path.join(sessionDir, entry.name);
-        const measured = fixupAndMeasureWav(filePath);
-        if (!measured) {
-          // Empty or unreadable file — best effort cleanup.
-          tryUnlink(filePath);
-          continue;
-        }
+        const result = await this.reconcileOrphan(sessionId, filePath, parsed);
+        if (!result) continue;
 
         maxIdx += 1;
         const startMs = lastEndMs;
-        const endMs = startMs + measured.durationMs;
-
+        const endMs = startMs + result.durationMs;
         try {
           this.store.insertChunk({
             id: parsed.chunkId,
             session_id: sessionId,
             idx: maxIdx,
             source: parsed.source,
-            file_path: filePath,
+            file_path: result.webmPath,
             start_ms: startMs,
             end_ms: endMs,
             overlap_prefix_ms: 0,
-            duration_ms: measured.durationMs,
-            bytes: measured.bytes,
+            duration_ms: result.durationMs,
+            bytes: result.bytes,
             sha256: null,
             device_boundary: false,
             sleep_boundary: false,
           });
           lastEndMs = endMs;
-          recovered++;
-          this.logger.info('recovery: orphan WAV reconstructed', {
+          report[result.bucket]++;
+          this.logger.info('recovery: orphan audio reconstructed', {
             sessionId,
             chunkId: parsed.chunkId,
             source: parsed.source,
-            durationMs: measured.durationMs,
-            bytes: measured.bytes,
+            ext: parsed.ext,
+            durationMs: result.durationMs,
+            bytes: result.bytes,
           });
         } catch (err) {
-          this.logger.warn('recovery: orphan WAV insertChunk failed', {
+          this.logger.warn('recovery: orphan audio insertChunk failed', {
             sessionId,
             chunkId: parsed.chunkId,
             message: err instanceof Error ? err.message : String(err),
@@ -272,66 +293,235 @@ export class RecoveryService {
         }
       }
     }
-    return recovered;
+  }
+
+  /**
+   * Per-file dispatch: do whatever's needed to land an orphan in the form
+   * the chunks row will reference (always `.webm`). Returns null when the
+   * file is unusable or encoding failed — caller skips this file silently
+   * (and a subsequent launch retries).
+   */
+  private async reconcileOrphan(
+    sessionId: string,
+    filePath: string,
+    parsed: ParsedAudioName,
+  ): Promise<OrphanResult | null> {
+    if (parsed.ext === 'webm') {
+      // Encoded but never persisted — probe duration, keep the file in place.
+      const durationMs = await probeWebmDurationMs(filePath, this.logger);
+      if (durationMs === null) return null;
+      let bytes: number;
+      try {
+        bytes = fs.statSync(filePath).size;
+      } catch {
+        return null;
+      }
+      return { webmPath: filePath, durationMs, bytes, bucket: 'recoveredOrphanWebms' };
+    }
+
+    // .pcm or .wav both need an encode. Skip silently if no encoder wired
+    // (tests can opt out by passing encoder=null).
+    if (!this.encoder) {
+      this.logger.debug('recovery: encoder not wired; leaving orphan in place', {
+        sessionId,
+        filePath,
+        ext: parsed.ext,
+      });
+      return null;
+    }
+
+    if (parsed.ext === 'pcm') {
+      let pcmBytes: number;
+      try {
+        pcmBytes = fs.statSync(filePath).size;
+      } catch {
+        return null;
+      }
+      if (pcmBytes <= 0) {
+        tryUnlink(filePath);
+        return null;
+      }
+      const durationMs = Math.round((pcmBytes / PCM_BYTES_PER_SECOND) * 1000);
+      const webmPath = filePath.replace(/\.pcm$/, '.webm');
+      let bytes: number;
+      try {
+        const r = await this.encoder.encode(filePath, webmPath);
+        bytes = r.bytes;
+      } catch (err) {
+        this.logger.warn('recovery: orphan PCM encode failed; leaving for next launch', {
+          sessionId,
+          filePath,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      }
+      tryUnlink(filePath);
+      return { webmPath, durationMs, bytes, bucket: 'recoveredOrphanPcms' };
+    }
+
+    if (parsed.ext === 'wav') {
+      // One-release legacy shim. Strip the 44-byte RIFF/WAVE header to get
+      // the raw PCM body, write it to a temp `.pcm`, encode, unlink both.
+      // We don't trust the WAV's internal size fields — we just read everything
+      // after byte 44, matching what the pre-migration WAV writer produced.
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        return null;
+      }
+      if (stat.size <= LEGACY_WAV_HEADER_BYTES) {
+        tryUnlink(filePath);
+        return null;
+      }
+      const pcmBytes = stat.size - LEGACY_WAV_HEADER_BYTES;
+      const durationMs = Math.round((pcmBytes / LEGACY_WAV_BYTES_PER_SECOND) * 1000);
+
+      const tmpPcm = filePath.replace(/\.wav$/, '.legacy.pcm');
+      try {
+        const fd = fs.openSync(tmpPcm, 'w', 0o600);
+        try {
+          const src = fs.openSync(filePath, 'r');
+          try {
+            const buf = Buffer.alloc(64 * 1024);
+            let offset = LEGACY_WAV_HEADER_BYTES;
+            for (;;) {
+              const n = fs.readSync(src, buf, 0, buf.length, offset);
+              if (n <= 0) break;
+              fs.writeSync(fd, buf, 0, n);
+              offset += n;
+            }
+            fs.fsyncSync(fd);
+          } finally {
+            fs.closeSync(src);
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch (err) {
+        this.logger.warn('recovery: legacy WAV header strip failed', {
+          sessionId,
+          filePath,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        tryUnlink(tmpPcm);
+        return null;
+      }
+
+      const webmPath = filePath.replace(/\.wav$/, '.webm');
+      let bytes: number;
+      try {
+        const r = await this.encoder.encode(tmpPcm, webmPath);
+        bytes = r.bytes;
+      } catch (err) {
+        this.logger.warn('recovery: legacy WAV encode failed; leaving for next launch', {
+          sessionId,
+          filePath,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        tryUnlink(tmpPcm);
+        return null;
+      }
+      tryUnlink(tmpPcm);
+      tryUnlink(filePath);
+      return { webmPath, durationMs, bytes, bucket: 'recoveredLegacyWavs' };
+    }
+
+    return null;
   }
 }
 
+type ParsedAudioName = {
+  chunkId: string;
+  source: ChunkSource;
+  ext: 'pcm' | 'webm' | 'wav';
+};
+
+type OrphanResult = {
+  webmPath: string;
+  durationMs: number;
+  bytes: number;
+  bucket: 'recoveredOrphanPcms' | 'recoveredOrphanWebms' | 'recoveredLegacyWavs';
+};
+
 /**
- * Parse a chunk WAV filename of the form `<chunkId>.<source>.wav`. Returns
- * null when the pattern doesn't match or the source isn't a known
- * ChunkSource — we don't want to invent rows for files we can't identify.
+ * Parse a chunk filename of the form `<chunkId>.<source>.<ext>` where ext is
+ * one of `pcm`, `webm`, `wav`. Returns null when the pattern doesn't match
+ * or the source/ext aren't recognized.
  */
-function parseChunkWavName(name: string): { chunkId: string; source: ChunkSource } | null {
-  const withoutExt = name.slice(0, -'.wav'.length);
-  const dot = withoutExt.lastIndexOf('.');
-  if (dot <= 0 || dot >= withoutExt.length - 1) return null;
-  const chunkId = withoutExt.slice(0, dot);
-  const sourceStr = withoutExt.slice(dot + 1);
+function parseChunkAudioName(name: string): ParsedAudioName | null {
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0 || dot >= name.length - 1) return null;
+  const extRaw = name.slice(dot + 1);
+  if (extRaw !== 'pcm' && extRaw !== 'webm' && extRaw !== 'wav') return null;
+  const withoutExt = name.slice(0, dot);
+  const dot2 = withoutExt.lastIndexOf('.');
+  if (dot2 <= 0 || dot2 >= withoutExt.length - 1) return null;
+  const chunkId = withoutExt.slice(0, dot2);
+  const sourceStr = withoutExt.slice(dot2 + 1);
   if (!(VALID_CHUNK_SOURCES as readonly string[]).includes(sourceStr)) return null;
-  return { chunkId, source: sourceStr as ChunkSource };
+  return { chunkId, source: sourceStr as ChunkSource, ext: extRaw };
 }
 
 /**
- * Patch the RIFF chunk-size + data-subchunk-size fields in an orphan WAV
- * so the file is a valid 16 kHz mono int16 WAV (matching WavFileWriter).
- * Returns { bytes, durationMs } on success; null if the file is too short
- * to contain any audio or can't be opened.
+ * Probe duration of a WebM/Opus file by invoking the bundled ffmpeg with
+ * `-i` (no -o), parsing the `Duration: HH:MM:SS.ms` line from stderr.
  *
- * Idempotent — re-running on an already-patched file produces the same
- * size fields.
+ * We use ffmpeg rather than ffprobe because ffmpeg-static doesn't ship the
+ * ffprobe binary, and shelling out to a system ffprobe isn't reliable
+ * (Electron apps don't get $PATH from the user shell on macOS).
+ *
+ * Returns null when probing fails — caller skips this file for now.
  */
-function fixupAndMeasureWav(filePath: string): { bytes: number; durationMs: number } | null {
-  let fd: number | null = null;
-  try {
-    const stat = fs.statSync(filePath);
-    const totalBytes = stat.size;
-    if (totalBytes <= WAV_HEADER_BYTES) return null;
-    const dataBytes = totalBytes - WAV_HEADER_BYTES;
-
-    fd = fs.openSync(filePath, 'r+');
-    const sizes = Buffer.alloc(4);
-
-    // RIFF chunk size at offset 4 = file size - 8.
-    sizes.writeUInt32LE(totalBytes - 8, 0);
-    fs.writeSync(fd, sizes, 0, 4, 4);
-    // data subchunk size at offset 40 = PCM byte count.
-    sizes.writeUInt32LE(dataBytes, 0);
-    fs.writeSync(fd, sizes, 0, 4, 40);
-    fs.fsyncSync(fd);
-
-    const durationMs = Math.round((dataBytes / WAV_BYTES_PER_SECOND) * 1000);
-    return { bytes: totalBytes, durationMs };
-  } catch {
+async function probeWebmDurationMs(filePath: string, logger: Logger): Promise<number | null> {
+  const ffmpegPath = resolveFfmpegPath();
+  if (!ffmpegPath) {
+    logger.warn('recovery: cannot probe webm, ffmpeg-static unavailable');
     return null;
-  } finally {
-    if (fd !== null) {
+  }
+  return await new Promise<number | null>((resolve) => {
+    let child;
+    try {
+      child = spawn(ffmpegPath, ['-hide_banner', '-i', filePath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
+    });
+    child.on('error', () => resolve(null));
+    // ffmpeg with no output spec exits non-zero ("at least one output file
+    // required") but still prints Duration before bailing.
+    child.on('close', () => {
+      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (!m) {
+        resolve(null);
+        return;
+      }
+      const h = Number(m[1]);
+      const min = Number(m[2]);
+      const s = Number(m[3]);
+      if (!Number.isFinite(h) || !Number.isFinite(min) || !Number.isFinite(s)) {
+        resolve(null);
+        return;
+      }
+      resolve(Math.round((h * 3600 + min * 60 + s) * 1000));
+    });
+    // Bounded timeout — ffmpeg should print Duration within a few hundred ms.
+    setTimeout(() => {
       try {
-        fs.closeSync(fd);
+        child.kill('SIGKILL');
       } catch {
         /* best-effort */
       }
-    }
-  }
+      resolve(null);
+    }, 5_000);
+  });
 }
 
 /** `true` iff `p` exists (any kind of file). Errors swallowed → `false`. */

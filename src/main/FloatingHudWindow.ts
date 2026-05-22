@@ -68,6 +68,7 @@ const VISUAL_BOUNDS: Record<HudPillVisual, { width: number; height: number }> = 
   recording: { width: 196, height: 32 },
   processing: { width: 60, height: 32 },
   failed: { width: 400, height: 100 },
+  dictationLimit: { width: 400, height: 100 },
   disconnected: { width: 400, height: 100 },
 };
 

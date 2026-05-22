@@ -20,7 +20,7 @@ function newChunkInput(over: Partial<Parameters<JobStore['insertChunk']>[0]> = {
     session_id: 's1',
     idx: 0,
     source: 'mixed' as const,
-    file_path: '/tmp/c1.mixed.wav',
+    file_path: '/tmp/c1.mixed.webm',
     start_ms: 0,
     end_ms: 30_000,
     overlap_prefix_ms: 0,

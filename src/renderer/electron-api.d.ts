@@ -16,6 +16,7 @@ declare global {
         stopDictation(): Promise<Record<string, never>>;
         startMeeting(input?: { title?: string }): Promise<{ sessionId: string }>;
         stopMeeting(input: { sessionId: string }): Promise<Record<string, never>>;
+        dictationLimitDismiss(): Promise<Record<string, never>>;
       };
       readonly permissions: {
         requestMic(): Promise<{ granted: boolean }>;

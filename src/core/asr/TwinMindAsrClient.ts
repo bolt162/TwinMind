@@ -9,7 +9,7 @@
  *   POST <transcribeUrl>
  *   Authorization: Bearer <firebase id token>
  *   Body (multipart/form-data):
- *     file:           the chunk's WAV file
+ *     file:           the chunk's WebM/Opus file
  *     device_used:    'twinmind_desktop'
  *     meeting_id:     the V2 session id (groups multiple chunks of one recording)
  *     chunk_duration: chunk length in seconds
@@ -61,12 +61,28 @@ export interface TwinMindAsrClientDeps {
   readonly auth: AsrCredentialsProvider;
   /** Default `globalThis.fetch`; test code passes a mock. */
   readonly fetchImpl?: typeof globalThis.fetch;
-  /** Request timeout (ms). Default 30 000. */
+  /**
+   * Fixed per-request timeout (ms). When set, used verbatim — useful for
+   * tests that need a deterministic abort window. When omitted, the client
+   * scales the timeout per request based on chunk duration (see
+   * `computeRequestTimeoutMs`); a 30-second meeting chunk gets ~45 s, a
+   * 5-minute dictation chunk gets ~3 min — enough headroom for the
+   * backend to actually finish transcribing without the desktop racing it
+   * to AbortError.
+   */
   readonly timeoutMs?: number;
   readonly logger?: Logger;
 }
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+/** Floor for the per-request timeout: covers network + small-chunk transcribe. */
+const BASE_TIMEOUT_MS = 30_000;
+/**
+ * Extra wall-time budget allowed per second of audio. Whisper-class models
+ * transcribe at ~10–30× realtime; 500 ms/audio-sec is roughly 2× the
+ * pessimistic case, comfortable margin for slow networks + backend queueing.
+ * For a 5-min chunk that's 150 s + 30 s base = 180 s total.
+ */
+const TIMEOUT_PER_AUDIO_SECOND_MS = 500;
 const DEVICE_USED = 'twinmind_desktop';
 
 /** Shape of the response body we tolerate from the TwinMind transcribe endpoint. */
@@ -91,7 +107,8 @@ export class TwinMindAsrClient implements IAsrClient {
   private readonly config: TwinMindAsrClientDeps['config'];
   private readonly auth: AsrCredentialsProvider;
   private readonly fetchImpl: typeof globalThis.fetch;
-  private readonly timeoutMs: number;
+  /** Explicit override from deps.timeoutMs; null means "auto-scale per request". */
+  private readonly timeoutMsOverride: number | null;
   private readonly logger: Logger;
 
   constructor(deps: TwinMindAsrClientDeps) {
@@ -102,8 +119,21 @@ export class TwinMindAsrClient implements IAsrClient {
       throw new Error('TwinMindAsrClient: no fetch impl available (Node < 18?)');
     }
     this.fetchImpl = f;
-    this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMsOverride = deps.timeoutMs ?? null;
     this.logger = deps.logger ?? noopLogger;
+  }
+
+  /**
+   * Per-request timeout. When the constructor was given an explicit
+   * `timeoutMs`, return it unchanged (test path / consumers that want a
+   * deterministic abort window). Otherwise scale: 30 s floor + 500 ms per
+   * audio-second. The floor matters for very-short chunks where the budget
+   * would otherwise be too tight for backend cold-start + network handshake.
+   */
+  private computeRequestTimeoutMs(req: TranscribeRequest): number {
+    if (this.timeoutMsOverride !== null) return this.timeoutMsOverride;
+    const durationSec = Math.max(0, (req.endOffsetMs - req.startOffsetMs) / 1000);
+    return BASE_TIMEOUT_MS + Math.ceil(durationSec * TIMEOUT_PER_AUDIO_SECOND_MS);
   }
 
   async transcribe(req: TranscribeRequest): Promise<TranscriptSegment> {
@@ -158,7 +188,7 @@ export class TwinMindAsrClient implements IAsrClient {
     // type signature is friendlier with the explicit conversion.
     form.append(
       'file',
-      new Blob([new Uint8Array(audioBytes)], { type: 'audio/wav' }),
+      new Blob([new Uint8Array(audioBytes)], { type: 'audio/webm' }),
       filename,
     );
     form.append('device_used', DEVICE_USED);
@@ -191,7 +221,8 @@ export class TwinMindAsrClient implements IAsrClient {
     if (req.contextHint) form.append('prompt', req.contextHint);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+    const requestTimeoutMs = this.computeRequestTimeoutMs(req);
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
       return await this.fetchImpl(this.config.transcribeUrl, {
         method: 'POST',

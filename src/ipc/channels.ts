@@ -76,6 +76,7 @@ export const REQUEST = {
   WIZARD_COMPLETE: 'wizard.complete',
   SESSION_RETRY_SUMMARY: 'session.retrySummary',
   SESSION_OPEN_SUMMARY: 'session.openSummary',
+  REC_DICTATION_LIMIT_DISMISS: 'recording.dictationLimitDismiss',
 } as const;
 export type RequestChannel = (typeof REQUEST)[keyof typeof REQUEST];
 
@@ -162,7 +163,17 @@ export interface AmplitudeSample {
 export type TranscriptionUiState =
   | { readonly kind: 'idle' }
   | { readonly kind: 'processing' }
-  | { readonly kind: 'failed'; readonly sessionId: string };
+  | { readonly kind: 'failed'; readonly sessionId: string }
+  /**
+   * dictation_limit_reached → the 5-min dictation hard cap fired and the
+   * orchestrator stopped the session. HUD shows a banner with Dismiss +
+   * Dictate buttons. Higher visual priority than `processing` so the user
+   * sees the prompt immediately (old session's chunks continue
+   * transcribing in the background and paste on completion). Cleared by
+   * REC_DICTATION_LIMIT_DISMISS (the Dismiss + Dictate buttons both
+   * dispatch it).
+   */
+  | { readonly kind: 'dictation_limit_reached'; readonly sessionId: string };
 
 export interface NavigateTab {
   readonly tab: 'recording' | 'dictations' | 'meetings' | 'settings';
@@ -440,6 +451,7 @@ export type HudPillVisual =
   | 'recording'
   | 'processing'
   | 'failed'
+  | 'dictationLimit'
   | 'disconnected';
 
 export interface HudSetVisualStateInput {
@@ -629,4 +641,5 @@ export interface RequestPayloads {
   [REQUEST.WIZARD_COMPLETE]: { input: Empty; output: Empty };
   [REQUEST.SESSION_RETRY_SUMMARY]: { input: SessionRetrySummaryInput; output: Empty };
   [REQUEST.SESSION_OPEN_SUMMARY]: { input: SessionOpenSummaryInput; output: Empty };
+  [REQUEST.REC_DICTATION_LIMIT_DISMISS]: { input: Empty; output: Empty };
 }

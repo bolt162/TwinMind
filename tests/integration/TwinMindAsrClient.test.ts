@@ -74,7 +74,7 @@ describe('TwinMindAsrClient', () => {
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'twinmind-asr-'));
-    audioPath = path.join(dir, 'chunk.wav');
+    audioPath = path.join(dir, 'chunk.webm');
     fs.writeFileSync(audioPath, Buffer.from([0, 1, 2, 3, 4]));
   });
 
