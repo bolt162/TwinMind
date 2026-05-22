@@ -13,7 +13,7 @@
  *     device_used:    'twinmind_desktop'
  *     meeting_id:     the V2 session id (groups multiple chunks of one recording)
  *     chunk_duration: chunk length in seconds
- *     log_data:       'true'        (backend-side telemetry consent)
+ *     log_data:       'true' for meeting, 'false' for dictation (privacy)
  *     log_audio:      'false'       (do NOT store raw audio server-side)
  *
  * Response: backends return either `{ transcript: "…" }` or `{ text: "…" }`;
@@ -212,10 +212,16 @@ export class TwinMindAsrClient implements IAsrClient {
     if (req.mode === 'meeting') {
       form.append('model', this.config.meetingModel);
     }
-    // Telemetry: opt INTO server-side request metadata so the backend can
-    // diagnose failures, but explicitly opt OUT of audio retention. The
-    // backend honors these — matches V1's defaults.
-    form.append('log_data', 'true');
+    // Telemetry:
+    //   - log_audio: ALWAYS false — never retain raw audio server-side.
+    //   - log_data:  true for meeting, FALSE for dictation. Dictation is
+    //     short, often personal/sensitive (replies, notes, drafts), and
+    //     hits the backend's `/choose` model-selection endpoint with no
+    //     pinned model — the request metadata isn't useful for backend-side
+    //     diagnostics the way meeting-mode requests (which carry a pinned
+    //     model + ~30 s chunks of conference audio) are. Opting dictation
+    //     out tightens the privacy envelope without losing useful telemetry.
+    form.append('log_data', req.mode === 'meeting' ? 'true' : 'false');
     form.append('log_audio', 'false');
     if (req.language) form.append('language', req.language);
     if (req.contextHint) form.append('prompt', req.contextHint);

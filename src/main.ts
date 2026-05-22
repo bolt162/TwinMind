@@ -209,6 +209,8 @@ interface ComposedBindings {
   readonly orchestratorStateDispose: () => void;
   /** Removes the upload-queue listeners (chunk_completed + chunk_failed_permanent). */
   readonly uploadQueueDispose: () => void;
+  /** Removes the orchestrator's chunk_persisted listener that drains the HUD. */
+  readonly chunkPersistedDispose: () => void;
 }
 
 // ─── BrowserWindow helpers (unchanged behavior) ─────────────────────────────
@@ -1201,6 +1203,45 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
   c.uploadQueue.on('chunk_completed', onChunkCompleted);
   c.uploadQueue.on('chunk_failed_permanent', onChunkFailedPermanent);
 
+  // ─── Orchestrator chunk_persisted → drain HUD + broadcast VAD-skip ───────
+  // Two jobs:
+  //   1. Drain the HUD's processing set for VAD-skipped chunks (UploadQueue
+  //      never fires chunk_completed for them since they bypass the upload
+  //      path). Sourced from the orchestrator's post-closeChunk emission
+  //      instead of from main's audioLink listener, which used to race the
+  //      orchestrator and read the DB before the row existed.
+  //   2. Broadcast TRANSCRIPT_SEGMENT for VAD-skipped chunks so SessionDetail
+  //      / dictation tile views refetch and the chunk shows up immediately
+  //      (with its empty transcript + HH:MM label). Voiced chunks are at
+  //      state='captured' here — their broadcast fires later from
+  //      onChunkCompleted with the actual text, so we deliberately skip
+  //      them in this branch to avoid an empty-text segment racing the
+  //      eventual transcript-carrying one.
+  const chunkPersistedDispose = c.orchestrator.onChunkPersisted(({ sessionId, chunkId }) => {
+    transcriptionUx.onChunkPersisted(sessionId);
+    const chunk = c.jobStore.getChunk(chunkId);
+    if (!chunk || chunk.state !== 'completed') return;
+    // VAD-skipped chunk: empty payload triggers `useSession` / `useDictations`
+    // to refetch — they just check `e.sessionId === sessionId` and reload,
+    // they don't render the segment text directly.
+    if (!bridge) return;
+    const payload = {
+      sessionId,
+      chunkId,
+      source: chunk.source,
+      startMs: chunk.start_ms,
+      endMs: chunk.end_ms,
+      text: '',
+    };
+    for (const win of BrowserWindow.getAllWindows()) {
+      try {
+        bridge.broadcast(win.webContents, PUSH.TRANSCRIPT_SEGMENT, payload);
+      } catch {
+        /* renderer gone */
+      }
+    }
+  });
+
   // ─── Orchestrator state listener (broadcasts recording state) ────────────
   let prevSnap: { sessionId: string | null; elapsedMs: number } | null = null;
   const stateListener = (snap: { sessionId: string | null; elapsedMs: number }) => {
@@ -1232,6 +1273,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
       void onChunkCompleted;
       void onChunkFailedPermanent;
     },
+    chunkPersistedDispose,
   };
 }
 
@@ -1241,6 +1283,7 @@ function detachComposedBindings(b: ComposedBindings): void {
   b.powerDispose();
   b.orchestratorStateDispose();
   b.uploadQueueDispose();
+  b.chunkPersistedDispose();
 }
 
 /**
@@ -1558,12 +1601,15 @@ app.whenReady().then(async () => {
       }
       return;
     }
-    if (msg.type === 'chunk_closed') {
-      const chunk = composed?.jobStore.getChunk(msg.chunkId);
-      if (chunk && composedBindings) {
-        composedBindings.transcriptionUx.onChunkPersisted(chunk.session_id);
-      }
-    }
+    // NB: chunk_closed used to call transcriptionUx.onChunkPersisted from
+    // here, but this listener registers BEFORE the orchestrator's audioLink
+    // listener, so getChunk ran before ChunkWriter.closeChunk had inserted
+    // the row — the notification was silently dropped. For VAD-skipped
+    // chunks (which never fire chunk_completed via UploadQueue) that meant
+    // the HUD waited the full PROCESSING_WATCHDOG_MS before draining. The
+    // orchestrator now emits its own 'chunk_persisted' event AFTER
+    // closeChunk's async write completes; main subscribes inside
+    // attachComposedBindings (search 'chunkPersistedDispose').
     if (msg.type === 'mic_rebound') {
       if (!shell) return;
       shell.platform.notifications.show(

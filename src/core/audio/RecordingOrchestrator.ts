@@ -430,6 +430,27 @@ export class RecordingOrchestrator {
     this.emitter.on('device_lost', cb);
   }
 
+  /**
+   * Subscribe to chunk-persisted notifications. Emitted from `onChunkClosed`
+   * AFTER `ChunkWriter.closeChunk` has finished writing the chunk row to the
+   * DB. main.ts wires this to `TranscriptionUx.onChunkPersisted` — the only
+   * signal that drains the HUD's processing state for VAD-skipped chunks
+   * (those bypass UploadQueue entirely, so `chunk_completed` never fires).
+   *
+   * Sourcing the event from the orchestrator (which OWNS the closeChunk
+   * promise) instead of from main.ts's audioLink subscriber eliminates a
+   * race: main's audioLink listener registers first and would otherwise
+   * call `getChunk` before the row exists, silently dropping the drain
+   * signal and stranding the HUD on the spinner for the full
+   * PROCESSING_WATCHDOG_MS (~30 s) on every VAD-skipped chunk.
+   *
+   * Returns an unsubscribe function so the bindings disposer can detach.
+   */
+  onChunkPersisted(cb: (e: { sessionId: string; chunkId: string }) => void): () => void {
+    this.emitter.on('chunk_persisted', cb);
+    return () => this.emitter.off('chunk_persisted', cb);
+  }
+
   // ─── Message routing from audio-process ──────────────────────────────────
 
   /**
@@ -663,12 +684,26 @@ export class RecordingOrchestrator {
    * RecoveryService to pick up on next launch (same path as a crash).
    */
   private onChunkClosed(chunkId: string, sumSquares: number, sampleCount: number): void {
-    const p = this.chunkWriter.closeChunk({ chunkId, sumSquares, sampleCount }).catch((err) => {
-      this.logger.error('chunkWriter.closeChunk threw', {
-        chunkId,
-        message: err instanceof Error ? err.message : String(err),
+    const p = this.chunkWriter
+      .closeChunk({ chunkId, sumSquares, sampleCount })
+      .then(() => {
+        // Read the freshly-written row to recover the sessionId for the
+        // listener. Skip silently if the row is missing — that's the
+        // phantom-cancel race (cancelPhantom aborted the row locally
+        // before the audio-process's chunk_closed reply landed).
+        const row = this.store.getChunk(chunkId);
+        if (row) {
+          this.emitter.emit('chunk_persisted', { sessionId: row.session_id, chunkId });
+        } else {
+          this.logger.debug('chunk_persisted skipped: row missing', { chunkId });
+        }
+      })
+      .catch((err) => {
+        this.logger.error('chunkWriter.closeChunk threw', {
+          chunkId,
+          message: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
     this.pendingCloses.add(p);
     p.finally(() => this.pendingCloses.delete(p)).catch(() => {});
   }
