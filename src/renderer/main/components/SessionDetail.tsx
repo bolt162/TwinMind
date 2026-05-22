@@ -444,7 +444,14 @@ function formatTimestamp(ms: number): string {
 }
 
 function formatDuration(sec: number): string {
-  const m = Math.floor(sec / 60);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
+  // Meetings can run for hours; once we cross the hour mark switch from
+  // the friendly "5m 30s" to H:MM:SS so a 1.5-hour meeting reads as
+  // "1:30:00" instead of "90m 0s".
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
   return m === 0 ? `${s}s` : `${m}m ${s}s`;
 }

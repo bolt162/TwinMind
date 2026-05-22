@@ -1111,8 +1111,15 @@ function DisconnectedBanner({
 }
 
 function formatElapsed(sec: number): string {
-  const m = Math.floor(sec / 60);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
+  // After the first hour, switch from MM:SS to H:MM:SS so a long meeting
+  // doesn't read as "61:30" / "127:00". Sub-hour stays MM:SS — matches the
+  // QuickTime / GarageBand convention of hiding zero leading components.
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
