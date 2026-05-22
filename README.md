@@ -87,8 +87,8 @@ If those env vars are missing the build still completes — notarization just ge
 ## Where things live
 
 - Transcripts, audio chunks, and the SQLite database live under
-  `~/Library/Application Support/TwinMind-V2/`
-- Logs are at `~/Library/Logs/TwinMind-V2/`
+  `~/Library/Application Support/TwinMind/`
+- Logs are at `~/Library/Logs/TwinMind/`
 - Your Groq API key lives in the macOS Keychain (`safeStorage`)
 
 To wipe everything, use **Settings → Delete all data** in the app.

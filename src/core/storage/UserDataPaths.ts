@@ -56,9 +56,24 @@ export function userIdSlug(userId: string): string {
   if (userId.length === 0) {
     throw new Error('userIdSlug: empty userId');
   }
-  // Strip leading/trailing dots so we never produce '.' or '..' as a dir name.
-  const sanitized = userId.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.+|\.+$/g, '_');
-  if (sanitized.length === 0 || sanitized === '.' || sanitized === '..') {
+  // Reject userIds composed entirely of dots ('.', '..', '...'). After the
+  // replace() steps below those would collapse to underscores and look
+  // benign, but they carry no identifying information and almost always
+  // signal a bug upstream (an empty/null userId got mishandled). Catching
+  // here is cheaper than tracking down a mystery `__/` user directory.
+  if (/^\.+$/.test(userId)) {
+    throw new Error(`userIdSlug: userId sanitizes to invalid name: ${JSON.stringify(userId)}`);
+  }
+  // 1) Non-allowed chars → '_' (slashes, pipes, control chars, …).
+  // 2) Replace a SINGLE leading dot and a SINGLE trailing dot with '_' so
+  //    we never write a hidden file (.foo) or look like a parent-dir
+  //    reference at the boundary, while preserving intra-name dots like
+  //    'john.doe'. We deliberately don't strip ALL leading dots — that
+  //    would turn '../etc/passwd' into 'etc_passwd' (information loss) or
+  //    '_etc_passwd' (collapses ambiguity). Single-replace keeps the
+  //    sanitized form readable: '../etc/passwd' → '_._etc_passwd'.
+  const sanitized = userId.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.|\.$/g, '_');
+  if (sanitized.length === 0) {
     throw new Error(`userIdSlug: userId sanitizes to invalid name: ${JSON.stringify(userId)}`);
   }
   return sanitized;

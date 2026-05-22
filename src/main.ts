@@ -67,8 +67,36 @@ import type { IGlobeKeyManager } from '@platform/IGlobeKeyManager';
 import { hotkeysEqual, type Hotkey } from '@core/hotkey/HotkeyTypes';
 import { resolveAudioteeBinaryPath } from '@platform/audioteeBinaryPath';
 
-// Isolate V2 userData from any V1 install. See HANDOFF / commit notes for why.
-app.setPath('userData', path.join(app.getPath('appData'), 'TwinMind-V2'));
+// userData folder. Set explicitly (rather than letting Electron derive from
+// productName) so it stays "TwinMind" across product renames and is easy to
+// reason about for support / log spelunking. Path:
+//   macOS:   ~/Library/Application Support/TwinMind
+//   Linux:   ~/.config/TwinMind          (if/when supported)
+//   Windows: %APPDATA%/TwinMind          (if/when supported)
+//
+// Pre-1.0 (versions 2.0.0-pre.x) wrote to `TwinMind-V2/`. We do a one-shot
+// rename here for any existing internal-tester / developer install that has
+// data in the legacy folder: if the new folder doesn't exist yet AND the
+// legacy folder does, atomically rename. Idempotent on subsequent launches
+// (the legacy folder is gone after the first successful rename). Failure
+// here is non-fatal — we fall through to setPath, which creates a fresh
+// `TwinMind/`; the legacy data stays put on disk for manual recovery if
+// the user notices.
+const USERDATA_DIRNAME = 'TwinMind';
+const LEGACY_USERDATA_DIRNAME = 'TwinMind-V2';
+{
+  const appData = app.getPath('appData');
+  const newPath = path.join(appData, USERDATA_DIRNAME);
+  const legacyPath = path.join(appData, LEGACY_USERDATA_DIRNAME);
+  try {
+    if (fs.existsSync(legacyPath) && !fs.existsSync(newPath)) {
+      fs.renameSync(legacyPath, newPath);
+    }
+  } catch {
+    // best-effort; setPath below still works against whatever's there
+  }
+  app.setPath('userData', newPath);
+}
 
 // ─── twinmind:// custom protocol (sign-in callback) ─────────────────────────
 //

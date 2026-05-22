@@ -10,6 +10,9 @@ import {
 
 describe('Migrations', () => {
   let db: Database.Database;
+  // The schema's latest version — derived from the migration registry so we
+  // don't have to update these tests every time a new migration is added.
+  const LATEST_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
   beforeEach(() => {
     db = new Database(':memory:');
@@ -18,13 +21,13 @@ describe('Migrations', () => {
   it('applies the initial migration on a fresh DB', () => {
     expect(getDbVersion(db)).toBe(0);
     prepareDatabase(db, MIGRATIONS);
-    expect(getDbVersion(db)).toBe(1);
+    expect(getDbVersion(db)).toBe(LATEST_VERSION);
 
-    // The schema_migrations table records the apply.
-    const row = db.prepare('SELECT version FROM schema_migrations ORDER BY version').get() as
-      | { version: number }
-      | undefined;
-    expect(row?.version).toBe(1);
+    // schema_migrations records every applied migration, not just the latest.
+    const rows = db
+      .prepare('SELECT version FROM schema_migrations ORDER BY version')
+      .all() as Array<{ version: number }>;
+    expect(rows.map((r) => r.version)).toEqual(MIGRATIONS.map((m) => m.version));
 
     // Schema is queryable: required tables exist.
     const tables = db
@@ -46,12 +49,13 @@ describe('Migrations', () => {
   it('is idempotent — second apply is a no-op', () => {
     prepareDatabase(db, MIGRATIONS);
     prepareDatabase(db, MIGRATIONS);
-    expect(getDbVersion(db)).toBe(1);
+    expect(getDbVersion(db)).toBe(LATEST_VERSION);
 
+    // Each migration applied exactly once across both prepareDatabase calls.
     const count = (
       db.prepare('SELECT COUNT(*) as n FROM schema_migrations').get() as { n: number }
     ).n;
-    expect(count).toBe(1);
+    expect(count).toBe(MIGRATIONS.length);
   });
 
   it('throws SchemaDowngradeError when DB is ahead of app', () => {

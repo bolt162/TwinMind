@@ -124,6 +124,12 @@ describe('RecordingOrchestrator — dictation happy path', () => {
     const chunkId = openMsg!.chunkId;
 
     const { sumSquares, sampleCount } = pretendAudioProcessSendsVoicedChunk(h.link, chunkId);
+    // Advance the fake clock past the phantom-hold threshold (500 ms) so
+    // stop() takes the real persist-chunk path instead of cancelPhantom —
+    // without this the session+chunk are deleted as if the user released
+    // the hotkey instantly, and the chunk count assertion below fails with
+    // an empty list. 1000 ms cleanly clears the 500 ms threshold.
+    h.clock.advance(1000);
     h.orchestrator.stop();
     // audio-process responds with chunk_closed after close_chunk; deliver it.
     h.link.deliverFromAudio({ type: 'chunk_closed', chunkId, bytesWritten: 0, sumSquares, sampleCount });
