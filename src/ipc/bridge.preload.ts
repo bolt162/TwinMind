@@ -165,6 +165,9 @@ const electronAPI = {
       subscribe(PUSH.SUMMARY_STATE_CHANGED, cb),
     hudEdgeAnchor: (cb: (e: PushPayloads[typeof PUSH.HUD_EDGE_ANCHOR]) => void) =>
       subscribe(PUSH.HUD_EDGE_ANCHOR, cb),
+    micPermissionRequired: (
+      cb: (e: PushPayloads[typeof PUSH.MIC_PERMISSION_REQUIRED]) => void,
+    ) => subscribe(PUSH.MIC_PERMISSION_REQUIRED, cb),
   },
 } as const;
 

@@ -69,6 +69,13 @@ export function HudApp() {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [deviceLost, setDeviceLost] = useState<DeviceLostState | null>(null);
   /**
+   * Set when main pushes MIC_PERMISSION_REQUIRED — i.e. the user tried to
+   * start a recording but the macOS mic permission isn't `granted`
+   * (denied, not_determined, or unavailable). HUD shows the "Please grant
+   * Microphone permission" banner; cleared by the Dismiss button.
+   */
+  const [micPermissionRequired, setMicPermissionRequired] = useState(false);
+  /**
    * Edge anchor pushed by main when the pill is near a workArea edge.
    * Used to flip the hover-group expansion direction so Take notes + Home
    * appear on the side AWAY from the edge (toward the screen interior).
@@ -213,6 +220,9 @@ export function HudApp() {
     const unsubAnchor = window.electronAPI.on.hudEdgeAnchor((e) => {
       setEdgeAnchor(e);
     });
+    const unsubMicPerm = window.electronAPI.on.micPermissionRequired(() => {
+      setMicPermissionRequired(true);
+    });
     return () => {
       unsubRec();
       unsubTx();
@@ -220,6 +230,7 @@ export function HudApp() {
       unsubLost();
       unsubAuth();
       unsubAnchor();
+      unsubMicPerm();
     };
   }, []);
 
@@ -292,31 +303,45 @@ export function HudApp() {
     | 'recording'
     | 'processing'
     | 'failed'
+    | 'micPermission'
     | 'dictationLimit'
     | 'disconnected'
     | 'hoverIdle'
     | 'busy'
     | 'idle';
-  // dictationLimit + disconnected are highest priority — both render a
-  // banner the user has to acknowledge before doing anything else.
-  // dictationLimit wins over recording because the orchestrator already
-  // stopped the session when it fired the limit.
-  const visual: Visual = txState.kind === 'dictation_limit_reached'
-    ? 'dictationLimit'
-    : deviceLost && !isRecording
-      ? 'disconnected'
-      : isRecording
-        ? 'recording'
-        : isBusy
-          ? 'busy'
-          : txState.kind === 'processing'
-            ? 'processing'
-            : txState.kind === 'failed'
-              ? 'failed'
-              : hovered
-                ? 'hoverIdle'
-                : 'idle';
+  // micPermission is highest priority — start was blocked before the
+  // orchestrator ran, so there's no recording / processing competing for
+  // the slot, and the banner needs to be unmissable so the user fixes
+  // permissions. dictationLimit + disconnected come next — banners the
+  // user has to acknowledge. dictationLimit wins over recording because
+  // the orchestrator already stopped the session when it fired the limit.
+  const visual: Visual = micPermissionRequired
+    ? 'micPermission'
+    : txState.kind === 'dictation_limit_reached'
+      ? 'dictationLimit'
+      : deviceLost && !isRecording
+        ? 'disconnected'
+        : isRecording
+          ? 'recording'
+          : isBusy
+            ? 'busy'
+            : txState.kind === 'processing'
+              ? 'processing'
+              : txState.kind === 'failed'
+                ? 'failed'
+                : hovered
+                  ? 'hoverIdle'
+                  : 'idle';
   const expanded = visual !== 'idle';
+  // Every wide-banner state (the user is being asked to act on a specific
+  // problem). Home + Take Notes are pulled out of the layout while a banner
+  // is showing — otherwise hovering the wide banner reveals them and they
+  // compete with the banner's own buttons for the user's attention.
+  const bannerVisible =
+    visual === 'failed' ||
+    visual === 'dictationLimit' ||
+    visual === 'disconnected' ||
+    visual === 'micPermission';
 
   // Notify main of the current visual state. Main uses this to decide
   // whether to shift the HUD window so larger states (banner: 400 × 100)
@@ -388,6 +413,11 @@ export function HudApp() {
     }
     if (isBusy) return;
     if (pillDisabled) return;
+    // Banner up → the only valid actions are the Open settings / Dismiss
+    // buttons inside the banner (they stopPropagation). A click on the
+    // pill body itself would otherwise re-fire startDictation → re-push
+    // the banner. Idempotent but pointless; just no-op.
+    if (micPermissionRequired) return;
     if (recording === 'idle' && txState.kind === 'idle') {
       void window.electronAPI.recording.startDictation().catch(() => {});
     } else if (isRecording && mode === 'dictation') {
@@ -427,7 +457,7 @@ export function HudApp() {
         onMouseLeave={() => setGroupHovered(false)}
       >
       <HomeButton
-        visible={hovered}
+        visible={hovered && !bannerVisible}
         onEnter={() => setGroupHovered(true)}
         onLeave={() => setGroupHovered(false)}
       />
@@ -449,7 +479,9 @@ export function HudApp() {
                   ? 'Microphone disconnected; pick a device to resume'
                   : visual === 'dictationLimit'
                     ? 'Dictation limit reached; dismiss or start a new dictation'
-                    : 'Start dictation'
+                    : visual === 'micPermission'
+                      ? 'Microphone permission required; open settings or dismiss'
+                      : 'Start dictation'
         }
         className={[
           // justify-center keeps single-child states (idle EQ glyph,
@@ -467,7 +499,10 @@ export function HudApp() {
           // hit-detectable (so the HUD's hover-reveal still works), but the
           // click handler short-circuits via `pillDisabled` above.
           pillDisabled ? 'opacity-40 cursor-not-allowed' : '',
-          visual === 'failed' || visual === 'disconnected' || visual === 'dictationLimit'
+          visual === 'failed' ||
+          visual === 'disconnected' ||
+          visual === 'dictationLimit' ||
+          visual === 'micPermission'
             ? 'px-6 py-4 items-stretch'
             : 'px-2',
         ].join(' ')}
@@ -546,6 +581,9 @@ export function HudApp() {
             onResolved={() => setDeviceLost(null)}
           />
         )}
+        {visual === 'micPermission' && (
+          <MicPermissionBanner onDismiss={() => setMicPermissionRequired(false)} />
+        )}
       </button>
       {/*
         Conditional render — not just opacity-0 — so Take Notes is COMPLETELY
@@ -558,8 +596,11 @@ export function HudApp() {
       <MeetingButton
         // Visibility rules (within the conditional-render gate above):
         //   - Recording meeting: ALWAYS visible (it's the stop affordance).
-        //   - Not recording: shown when the HUD group is hovered.
-        visible={hovered || (isRecording && mode === 'meeting')}
+        //   - Not recording: shown when the HUD group is hovered, UNLESS
+        //     a banner is up — Take Notes shouldn't compete with the
+        //     banner's own buttons. (None of the banner states fire
+        //     mid-recording today, so the carve-out is defensive.)
+        visible={(hovered && !bannerVisible) || (isRecording && mode === 'meeting')}
         // Drag plumbing — share the parent's drag refs so Take Notes is a
         // valid grab-handle for moving the HUD, same as the Dictate pill.
         // getDragMoved/clearDragMoved let handleClick suppress its own
@@ -754,6 +795,7 @@ type PillVisual =
   | 'recording'
   | 'processing'
   | 'failed'
+  | 'micPermission'
   | 'dictationLimit'
   | 'disconnected'
   | 'hoverIdle'
@@ -781,6 +823,8 @@ function pillWidth(v: PillVisual): number {
       return 400;
     case 'dictationLimit':
       return 400;
+    case 'micPermission':
+      return 400;
   }
 }
 
@@ -798,7 +842,14 @@ function hoverIdleWidth(label: string): number {
 }
 
 function pillHeight(v: PillVisual): number {
-  if (v === 'failed' || v === 'disconnected' || v === 'dictationLimit') return PILL_HEIGHT_FAILED;
+  if (
+    v === 'failed' ||
+    v === 'disconnected' ||
+    v === 'dictationLimit' ||
+    v === 'micPermission'
+  ) {
+    return PILL_HEIGHT_FAILED;
+  }
   if (v === 'idle') return PILL_HEIGHT_IDLE;
   return PILL_HEIGHT_EXPANDED;
 }
@@ -1013,6 +1064,64 @@ function DictationLimitBanner() {
         >
           <Mic className="h-3.5 w-3.5" />
           Dictate
+        </button>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Mic permission banner: shown when a recording-start attempt was
+ * rejected because the macOS mic permission isn't `granted`. Mirrors
+ * FailedBanner's two-column layout exactly. Buttons:
+ *
+ *   Open settings — opens System Settings → Privacy → Microphone via
+ *                   the existing PERMISSIONS_OPEN_SYSTEM_SETTINGS IPC.
+ *   Dismiss       — clears the local banner state; HUD returns to idle.
+ *                   No main-side cleanup needed (the orchestrator was
+ *                   never started).
+ */
+function MicPermissionBanner({ onDismiss }: { onDismiss: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const onOpenSettings: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    void window.electronAPI.permissions
+      .openSystemSettings({ kind: 'mic' })
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+  const onDismissClick: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    onDismiss();
+  };
+  return (
+    <span className="flex h-full w-full items-center justify-center gap-2">
+      {/* Single-line headline — the other banners have a sub-line and use
+          flex-col gap-1; here we just centre the one row vertically against
+          the 100 px banner so it doesn't float near the top. */}
+      <span className="flex min-w-0 flex-1 items-center gap-2">
+        <MicOff className="h-4 w-4 shrink-0 text-red-500" strokeWidth={2.5} />
+        <span className="font-serif text-[16px] font-semibold leading-tight text-white">
+          Please grant Microphone permission
+        </span>
+      </span>
+      <span className="flex shrink-0 flex-col justify-center gap-1.5">
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          disabled={busy}
+          className="flex w-28 items-center justify-center gap-1 rounded-md border border-amber-700/70 bg-amber-900/40 px-2 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-60"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+          onClick={onDismissClick}
+          className="flex w-28 items-center justify-center gap-1 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[12px] font-medium text-white/85 hover:bg-white/10"
+        >
+          Dismiss
         </button>
       </span>
     </span>

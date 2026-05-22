@@ -7,17 +7,16 @@
  * see those steps again on the next sign-in.
  *
  * UX:
- *   - Single "Continue with Google" button when no users have signed in.
- *   - When the local user directory has previous sign-ins, surface them as
- *     "Continue as <email>" chips. Clicking one starts the OAuth dance;
- *     Google's account chooser handles disambiguation, so we don't pin a
- *     hint email to the URL (avoids forcing a particular Google account
- *     and gives the user a clear way to switch).
+ *   - Single "Sign in" button — Google's account chooser handles
+ *     disambiguation, so we don't pin a hint email to the URL (avoids
+ *     forcing a particular Google account and gives the user a clear way
+ *     to switch). The local user directory (auth.listUsers) keeps tracking
+ *     previous sign-ins for backend/identity bookkeeping, just no longer
+ *     surfaced as "Continue as" chips here.
  *   - If the backend env is unconfigured, show the missing-var list.
  */
 
-import { useEffect, useState } from 'react';
-import type { AuthUserDirectoryEntry } from '@ipc/channels';
+import { useState } from 'react';
 
 interface SignInScreenProps {
   /** Names of env vars the backend needs but doesn't have. Null when config is fine. */
@@ -27,16 +26,6 @@ interface SignInScreenProps {
 export function SignInScreen({ configMissing }: SignInScreenProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [previous, setPrevious] = useState<ReadonlyArray<AuthUserDirectoryEntry>>([]);
-
-  useEffect(() => {
-    void window.electronAPI.auth
-      .listUsers()
-      .then((r) => setPrevious(r.users))
-      .catch(() => {
-        /* not initialized yet or transient — fine */
-      });
-  }, []);
 
   const configBroken = configMissing && configMissing.length > 0;
 
@@ -85,56 +74,13 @@ export function SignInScreen({ configMissing }: SignInScreenProps) {
           </div>
         ) : null}
 
-        {previous.length > 0 ? (
-          <div className="mt-6">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
-              Continue as
-            </div>
-            <div className="space-y-2">
-              {previous.map((u) => (
-                <button
-                  key={u.id}
-                  type="button"
-                  onClick={handleSignIn}
-                  disabled={busy || !!configBroken}
-                  className="flex w-full items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-left transition hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {u.photoUrl ? (
-                    <img
-                      src={u.photoUrl}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                      className="h-8 w-8 rounded-full border border-zinc-800 object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-xs text-zinc-400">
-                      {(u.email[0] ?? '?').toUpperCase()}
-                    </div>
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm text-zinc-100">
-                      {u.name ?? u.email}
-                    </div>
-                    {u.name ? (
-                      <div className="truncate text-xs text-zinc-500">{u.email}</div>
-                    ) : null}
-                  </div>
-                </button>
-              ))}
-            </div>
-            <div className="mt-3 text-xs text-zinc-500">
-              Or sign in with a different Google account:
-            </div>
-          </div>
-        ) : null}
-
         <button
           type="button"
           onClick={handleSignIn}
           disabled={busy || !!configBroken}
-          className="mt-4 w-full rounded-lg bg-zinc-50 px-4 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+          className="mt-6 w-full rounded-lg bg-zinc-50 px-4 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          {busy ? 'Opening browser…' : 'Continue with Google'}
+          {busy ? 'Opening browser…' : 'Sign in'}
         </button>
 
         {busy ? (

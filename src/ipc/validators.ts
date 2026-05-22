@@ -220,6 +220,9 @@ export const PushSchemas = {
     x: z.enum(['left', 'right', 'center']),
     y: z.enum(['top', 'bottom', 'center']),
   }),
+  [PUSH.MIC_PERMISSION_REQUIRED]: z.object({
+    mode: z.enum(['dictation', 'meeting']),
+  }),
 } as const;
 
 // ─── REQUEST schemas (input + output per channel) ────────────────────────────
@@ -364,6 +367,7 @@ const hudSetVisualStateInput = z.object({
     'failed',
     'dictationLimit',
     'disconnected',
+    'micPermission',
   ]),
 });
 

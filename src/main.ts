@@ -426,6 +426,34 @@ function requireShell(): Shell {
   return shell;
 }
 
+/**
+ * Gate every recording-start call site behind this. Reads the macOS mic
+ * grant; if anything other than `granted` (denied, not_determined,
+ * unavailable) we broadcast `MIC_PERMISSION_REQUIRED` to the HUD + every
+ * renderer so the HUD shows the "Please grant Microphone permission"
+ * banner, and return false so the caller short-circuits without invoking
+ * the orchestrator. Returns true only when the OS has actually granted —
+ * we deliberately do NOT implicitly call `permissions.request('mic')`
+ * here even on `not_determined`; the banner surfaces the requirement
+ * instead of firing the native prompt under the user.
+ */
+function ensureMicGrantedOrBanner(mode: 'dictation' | 'meeting'): boolean {
+  const grant = requireShell().platform.permissions.read('mic');
+  if (grant === 'granted') return true;
+  if (!bridge) return false;
+  const targets: WebContents[] = [];
+  if (hud) targets.push(hud.webContents());
+  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  for (const wc of targets) {
+    try {
+      bridge.broadcast(wc, PUSH.MIC_PERMISSION_REQUIRED, { mode });
+    } catch {
+      /* renderer torn down */
+    }
+  }
+  return false;
+}
+
 function wireIpc(b: IpcBridgeMain): void {
   // ── Auth (always available — touches shell) ──────────────────────────────
   b.handle(REQUEST.AUTH_GET_STATE, () => requireShell().authProvider.getViewState());
@@ -715,6 +743,7 @@ function wireIpc(b: IpcBridgeMain): void {
   b.handle(REQUEST.REC_START_DICTATION, () => {
     const c = requireComposed();
     if (composedBindings?.transcriptionUx.isBlockingNewRecording()) return {};
+    if (!ensureMicGrantedOrBanner('dictation')) return {};
     c.orchestrator.startDictation();
     hud?.revealOnActiveDisplay();
     return {};
@@ -727,6 +756,13 @@ function wireIpc(b: IpcBridgeMain): void {
     const c = requireComposed();
     if (composedBindings?.transcriptionUx.isBlockingNewRecording()) {
       throw new Error('Busy processing previous recording');
+    }
+    // Meeting REQ's contract is `{ sessionId }`; if mic permission is
+    // denied we still need to return a string, so throw — the renderer's
+    // .catch(() => {}) swallows it and the broadcasted banner is what the
+    // user actually sees.
+    if (!ensureMicGrantedOrBanner('meeting')) {
+      throw new Error('Microphone permission required');
     }
     const sessionId = c.orchestrator.startMeeting({ title });
     hud?.revealOnActiveDisplay();
@@ -853,6 +889,7 @@ function registerPrimaryHotkey(c: ComposedApp, hotkey: Hotkey): () => void {
         c.orchestrator.state === 'idle' &&
         !composedBindings?.transcriptionUx.isBlockingNewRecording()
       ) {
+        if (!ensureMicGrantedOrBanner('dictation')) return;
         c.orchestrator.startDictation();
         hud?.revealOnActiveDisplay();
         primaryHoldStarted = true;
@@ -869,6 +906,7 @@ function registerPrimaryHotkey(c: ComposedApp, hotkey: Hotkey): () => void {
         c.orchestrator.state === 'idle' &&
         !composedBindings?.transcriptionUx.isBlockingNewRecording()
       ) {
+        if (!ensureMicGrantedOrBanner('dictation')) return;
         c.orchestrator.startDictation();
         hud?.revealOnActiveDisplay();
       }
@@ -961,6 +999,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
           c.orchestrator.state === 'idle' &&
           !transcriptionUx.isBlockingNewRecording()
         ) {
+          if (!ensureMicGrantedOrBanner('dictation')) return;
           c.orchestrator.startDictation();
           hud?.revealOnActiveDisplay();
           globeHoldStarted = true;
@@ -980,6 +1019,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
           c.orchestrator.state === 'idle' &&
           !transcriptionUx.isBlockingNewRecording()
         ) {
+          if (!ensureMicGrantedOrBanner('dictation')) return;
           c.orchestrator.startDictation();
           hud?.revealOnActiveDisplay();
         }
@@ -1047,6 +1087,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
       },
       (action) => {
         if (action === 'resume') {
+          if (!ensureMicGrantedOrBanner('meeting')) return;
           c.orchestrator.startMeeting({ title: `Resumed from ${e.sessionId.slice(0, 8)}` });
           hud?.revealOnActiveDisplay();
         }
@@ -1062,6 +1103,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
       // Tracked via the existing outcome event, NOT 'meeting_notification_shown'
       // (which would lie — no notification was ever shown).
       if (cfg.meetingDetection.autoStart) {
+        if (!ensureMicGrantedOrBanner('meeting')) return;
         c.orchestrator.startMeeting();
         c.meetingDetection?.recordOutcome(evt.promptId, 'accepted');
         c.analytics.track('meeting_notification_outcome', { action: 'accepted' });
@@ -1094,6 +1136,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
             c.meetingDetection?.recordOutcome(evt.promptId, outcome);
             c.analytics.track('meeting_notification_outcome', { action: outcome });
             if (outcome === 'accepted') {
+              if (!ensureMicGrantedOrBanner('meeting')) return;
               c.orchestrator.startMeeting();
               hud?.revealOnActiveDisplay();
             }

@@ -30,6 +30,16 @@ export const PUSH = {
   AUTH_STATE_CHANGED: 'auth_state_changed',
   SUMMARY_STATE_CHANGED: 'summary_state_changed',
   HUD_EDGE_ANCHOR: 'hud_edge_anchor',
+  /**
+   * Sent by main when the user tried to start a recording (dictation or
+   * meeting, from any entry point — UI button, hotkey, meeting auto-detect,
+   * device-loss resume) and the macOS microphone permission is NOT
+   * `granted`. The HUD renders a banner asking the user to grant the
+   * permission; the orchestrator was never invoked. `not_determined` is
+   * treated the same as `denied` here — we surface the banner instead of
+   * silently firing the native prompt under the user.
+   */
+  MIC_PERMISSION_REQUIRED: 'mic_permission_required',
 } as const;
 export type PushChannel = (typeof PUSH)[keyof typeof PUSH];
 
@@ -221,6 +231,18 @@ export interface MicDeviceLost {
   readonly lastDeviceLabel: string | null;
   readonly reason: string;
   readonly devices: ReadonlyArray<InputDeviceInfo>;
+}
+
+/**
+ * Sent from main when a recording-start attempt was rejected because the
+ * macOS microphone permission isn't `granted` (it's `denied`,
+ * `not_determined`, or `unavailable`). HUD renders a banner with
+ * "Open settings" + "Dismiss"; the orchestrator was never started.
+ * `mode` is the user-requested mode so future copy could vary; today
+ * the banner text is the same either way.
+ */
+export interface MicPermissionRequired {
+  readonly mode: 'dictation' | 'meeting';
 }
 
 /**
@@ -458,7 +480,8 @@ export type HudPillVisual =
   | 'processing'
   | 'failed'
   | 'dictationLimit'
-  | 'disconnected';
+  | 'disconnected'
+  | 'micPermission';
 
 export interface HudSetVisualStateInput {
   readonly visual: HudPillVisual;
@@ -563,6 +586,7 @@ export interface PushPayloads {
   [PUSH.AUTH_STATE_CHANGED]: AuthStateChanged;
   [PUSH.SUMMARY_STATE_CHANGED]: SummaryStateChanged;
   [PUSH.HUD_EDGE_ANCHOR]: HudEdgeAnchor;
+  [PUSH.MIC_PERMISSION_REQUIRED]: MicPermissionRequired;
 }
 
 /** Request channels: channel name → { input, output } pair. */

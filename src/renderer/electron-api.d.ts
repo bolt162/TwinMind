@@ -147,6 +147,9 @@ declare global {
         hudEdgeAnchor(
           cb: (e: PushPayloads['hud_edge_anchor']) => void,
         ): () => void;
+        micPermissionRequired(
+          cb: (e: PushPayloads['mic_permission_required']) => void,
+        ): () => void;
       };
     };
   }

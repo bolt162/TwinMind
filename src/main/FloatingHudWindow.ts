@@ -86,6 +86,7 @@ const VISUAL_BOUNDS: Record<HudPillVisual, { width: number; height: number }> = 
   failed: { width: 400, height: 100 },
   dictationLimit: { width: 400, height: 100 },
   disconnected: { width: 400, height: 100 },
+  micPermission: { width: 400, height: 100 },
 };
 
 export class FloatingHudWindow {
