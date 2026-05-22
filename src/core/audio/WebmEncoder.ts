@@ -34,8 +34,21 @@ import path from 'node:path';
 
 /** Bitrate target for libopus. 32 kbps mono ≈ V1's MediaRecorder default. */
 const DEFAULT_BITRATE = '32k';
-/** Hard wall-clock cap on a single encode. Real encodes take ~50-200 ms. */
-const DEFAULT_TIMEOUT_MS = 10_000;
+/**
+ * Floor for the per-call wall-clock cap. Covers ffmpeg's macOS spawn
+ * overhead (~150-300 ms) + libopus's per-call setup, regardless of how
+ * tiny the input is.
+ */
+const BASE_TIMEOUT_MS = 10_000;
+/**
+ * Extra budget per second of audio. libopus speech encodes at roughly
+ * 20-50× realtime; 100 ms/audio-sec gives a 2-5× safety margin which
+ * holds even on Intel Macs and battery-throttled M-series under load.
+ * For a 5-min chunk that's 30 s of headroom on top of BASE_TIMEOUT_MS.
+ */
+const TIMEOUT_PER_AUDIO_SECOND_MS = 100;
+/** Raw int16 mono 16 kHz: 32 000 bytes per second of audio. */
+const PCM_BYTES_PER_SECOND = 32_000;
 
 const ASAR_SEGMENT = `${path.sep}app.asar${path.sep}`;
 const UNPACKED_SEGMENT = `${path.sep}app.asar.unpacked${path.sep}`;
@@ -59,7 +72,15 @@ export interface WebmEncoderOptions {
   readonly ffmpegPath?: string;
   /** libopus bitrate string passed as `-b:a`. Default `32k`. */
   readonly bitrate?: string;
-  /** Hard wall-clock cap per encode, ms. Default 10 000. */
+  /**
+   * Fixed wall-clock cap per encode (ms). When set, used verbatim — useful
+   * for tests that need a deterministic abort window. When omitted, the
+   * timeout scales with input audio duration: BASE_TIMEOUT_MS +
+   * audio-seconds × TIMEOUT_PER_AUDIO_SECOND_MS. A 30 s meeting chunk gets
+   * ~13 s; a 5-min dictation chunk gets ~40 s — wide enough to absorb
+   * encoder slowdowns on older hardware without prematurely killing
+   * ffmpeg.
+   */
   readonly timeoutMs?: number;
 }
 
@@ -88,7 +109,8 @@ export function resolveFfmpegPath(): string | null {
 export class WebmEncoder {
   private readonly ffmpegPath: string;
   private readonly bitrate: string;
-  private readonly timeoutMs: number;
+  /** Explicit override from opts.timeoutMs; null means "scale per encode". */
+  private readonly timeoutMsOverride: number | null;
 
   constructor(opts: WebmEncoderOptions = {}) {
     const p = opts.ffmpegPath ?? resolveFfmpegPath();
@@ -99,7 +121,27 @@ export class WebmEncoder {
     }
     this.ffmpegPath = p;
     this.bitrate = opts.bitrate ?? DEFAULT_BITRATE;
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMsOverride = opts.timeoutMs ?? null;
+  }
+
+  /**
+   * Compute the per-call wall-clock cap. Explicit override wins; otherwise
+   * derive audio duration from the PCM file size (16 kHz mono int16 =
+   * fixed 32 000 bytes/sec) and add a per-audio-second buffer on top of
+   * BASE_TIMEOUT_MS. If stat fails (input doesn't exist), fall back to
+   * the base — ffmpeg will fail with nonzero_exit shortly anyway, no
+   * point waiting longer.
+   */
+  private computeTimeoutMs(pcmPath: string): number {
+    if (this.timeoutMsOverride !== null) return this.timeoutMsOverride;
+    let audioSec = 0;
+    try {
+      audioSec = fs.statSync(pcmPath).size / PCM_BYTES_PER_SECOND;
+    } catch {
+      // Input missing; let ffmpeg report the real error. Base timeout
+      // is plenty for that path.
+    }
+    return BASE_TIMEOUT_MS + Math.ceil(audioSec * TIMEOUT_PER_AUDIO_SECOND_MS);
   }
 
   /**
@@ -109,6 +151,7 @@ export class WebmEncoder {
    * `.pcm` file untouched so recovery can retry next launch.
    */
   encode(pcmPath: string, webmPath: string): Promise<{ bytes: number }> {
+    const timeoutMs = this.computeTimeoutMs(pcmPath);
     return new Promise((resolve, reject) => {
       const args = [
         '-hide_banner',
@@ -121,6 +164,14 @@ export class WebmEncoder {
         '-c:a', 'libopus',
         '-b:a', this.bitrate,
         '-application', 'voip',
+        // Encoder-side analysis depth (0=fastest, 10=highest quality).
+        // libopus's complexity knob does NOT change bitrate, codec mode,
+        // or phonetic content — only psychoacoustic-model search depth.
+        // Since we send to ASR (Whisper-class) and not human ears,
+        // complexity 0 is appropriate: ~2× faster encode, ~7% larger
+        // output (real speech: still tiny). Bench at 5 min random PCM:
+        // default complexity 10 = 5.6 s wall; complexity 0 = 2.7 s wall.
+        '-compression_level', '0',
         '-f', 'webm',
         webmPath,
       ];
@@ -149,8 +200,8 @@ export class WebmEncoder {
         child.kill('SIGKILL');
         // Best-effort cleanup of a half-written WebM.
         try { fs.unlinkSync(webmPath); } catch { /* best-effort */ }
-        reject(new WebmEncodeError('timeout', `ffmpeg exceeded ${this.timeoutMs} ms`, stderr));
-      }, this.timeoutMs);
+        reject(new WebmEncodeError('timeout', `ffmpeg exceeded ${timeoutMs} ms`, stderr));
+      }, timeoutMs);
 
       child.on('error', (err) => {
         if (settled) return;
