@@ -24,6 +24,7 @@
   "afterSign": "scripts/notarize.js",
   "afterAllArtifactBuild": "scripts/notarize.js",
   "mac": {
+    "icon": "resources/mac/icon.icns",
     "category": "public.app-category.productivity",
     "hardenedRuntime": true,
     "gatekeeperAssess": false,
