@@ -81,7 +81,7 @@ export function HudApp() {
   const [micPermissionRequired, setMicPermissionRequired] = useState(false);
   /**
    * Edge anchor pushed by main when the pill is near a workArea edge.
-   * Used to flip the hover-group expansion direction so Take notes + Home
+   * Used to flip the hover-group expansion direction so Capture notes + Home
    * appear on the side AWAY from the edge (toward the screen interior).
    */
   const [edgeAnchor, setEdgeAnchor] = useState<{
@@ -112,8 +112,8 @@ export function HudApp() {
       setHovered(true);
     } else {
       // 350 ms grace covers a slow-cursor traversal of the full hover
-      // group (Dictate → Take Notes → Home ≈ 270 px at typical casual
-      // speeds). Earlier 180 ms was tight when Take Notes was an icon-
+      // group (Dictate → Capture notes → Home ≈ 270 px at typical casual
+      // speeds). Earlier 180 ms was tight when Capture notes was an icon-
       // only chip; with the wider pill it's no longer enough.
       hoverTimeoutRef.current = setTimeout(() => setHovered(false), 350);
     }
@@ -163,7 +163,7 @@ export function HudApp() {
     const unsubRec = window.electronAPI.on.recordingStateChanged((e) => {
       // Mode is part of the push payload; the HUD uses it to decide which
       // affordance owns the recording state (main pill for dictation, the
-      // new "Take notes" button for meetings).
+      // new "Capture notes" button for meetings).
       setMode(e.mode);
       if (e.state === 'starting' || e.state === 'recording' || e.state === 'stopping') {
         setRecording(e.state);
@@ -338,7 +338,7 @@ export function HudApp() {
                   : 'idle';
   const expanded = visual !== 'idle';
   // Every wide-banner state (the user is being asked to act on a specific
-  // problem). Home + Take Notes are pulled out of the layout while a banner
+  // problem). Home + Capture notes are pulled out of the layout while a banner
   // is showing — otherwise hovering the wide banner reveals them and they
   // compete with the banner's own buttons for the user's attention.
   const bannerVisible =
@@ -407,7 +407,7 @@ export function HudApp() {
 
   // The main pill drives DICTATION only. If a meeting is recording, the
   // pill is non-interactive — the user must stop the meeting first (via
-  // the "Take notes" button next to it).
+  // the "Capture notes" button next to it).
   const pillDisabled = isRecording && mode === 'meeting';
 
   const onPillClick = () => {
@@ -445,13 +445,13 @@ export function HudApp() {
       <div
         className={[
           'flex items-center gap-2',
-          // Group layout is [Home] [Dictate] [Take Notes]. When the pill is
+          // Group layout is [Home] [Dictate] [Capture notes]. When the pill is
           // hugging the RIGHT edge of workArea, default flex-row puts Take
           // Notes off the edge; flex-row-reverse swaps the order so the
           // small (28 px) Home button trails the pill instead of the wider
-          // (~120 px) Take Notes pill — much less overflow. Left edge
+          // (~120 px) Capture notes pill — much less overflow. Left edge
           // intentionally NOT flipped because reversing there would push
-          // Take Notes (big) off-screen instead of Home (small).
+          // Capture notes (big) off-screen instead of Home (small).
           edgeAnchor.x === 'right' ? 'flex-row-reverse' : '',
         ]
           .filter(Boolean)
@@ -528,9 +528,9 @@ export function HudApp() {
           // — the pill itself uses `justify-start` so we'd otherwise see
           // the dot pinned to the left edge.
           <span className="mx-auto flex items-center gap-[2px]" aria-hidden>
-            <span className="block h-2 w-0.5 rounded-sm bg-white" />
-            <span className="block h-3 w-0.5 rounded-sm bg-white" />
-            <span className="block h-2 w-0.5 rounded-sm bg-white" />
+            <span className="block h-3 w-[3px] rounded-sm bg-white" />
+            <span className="block h-4 w-[3px] rounded-sm bg-white" />
+            <span className="block h-3 w-[3px] rounded-sm bg-white" />
           </span>
         )}
         {visual === 'hoverIdle' && (
@@ -566,6 +566,17 @@ export function HudApp() {
         )}
         {visual === 'recording' && (
           <>
+            {/* Dictation-only stop indicator. The pill IS the stop affordance
+                (clicking it stops the dictation), so the red square mirrors
+                the same idiom the Capture-notes button uses for its stop
+                state. Meetings don't get this — their stop affordance is on
+                the Capture-notes button instead and the main pill is dimmed. */}
+            {mode === 'dictation' && (
+              <span
+                className="h-2 w-2 shrink-0 rounded-[1px] bg-red-500"
+                aria-hidden
+              />
+            )}
             <Waveform bars={barsRef.current} />
             <span className="shrink-0 text-[11px] font-medium tabular-nums text-white/85">
               {formatElapsed(elapsedSec)}
@@ -594,7 +605,7 @@ export function HudApp() {
         )}
       </button>
       {/*
-        Conditional render — not just opacity-0 — so Take Notes is COMPLETELY
+        Conditional render — not just opacity-0 — so Capture notes is COMPLETELY
         gone from the DOM/layout during dictation. opacity-0 left a
         transparent, layout-occupying ghost the user could perceive; this
         removes the element entirely. Pops back into the layout when
@@ -605,11 +616,11 @@ export function HudApp() {
         // Visibility rules (within the conditional-render gate above):
         //   - Recording meeting: ALWAYS visible (it's the stop affordance).
         //   - Not recording: shown when the HUD group is hovered, UNLESS
-        //     a banner is up — Take Notes shouldn't compete with the
+        //     a banner is up — Capture notes shouldn't compete with the
         //     banner's own buttons. (None of the banner states fire
         //     mid-recording today, so the carve-out is defensive.)
         visible={(hovered && !bannerVisible) || (isRecording && mode === 'meeting')}
-        // Drag plumbing — share the parent's drag refs so Take Notes is a
+        // Drag plumbing — share the parent's drag refs so Capture notes is a
         // valid grab-handle for moving the HUD, same as the Dictate pill.
         // getDragMoved/clearDragMoved let handleClick suppress its own
         // start/stop action when a drag ended over the button.
@@ -647,12 +658,12 @@ export function HudApp() {
 }
 
 /**
- * "Take notes" — the only entry point for meeting mode. A pill-shaped
+ * "Capture notes" — the only entry point for meeting mode. A pill-shaped
  * button that sits alongside the main dictation pill, mirroring its
  * icon+label visual language so the two entry points feel like
  * siblings. Three states:
  *
- *   idle / not recording   →  Radio icon + "Take Notes" label.
+ *   idle / not recording   →  Radio icon + "Capture notes" label.
  *                             Click starts a meeting.
  *   recording (this mode)  →  Red dot + "Stop" label. Click stops the
  *                             meeting. (Dictation pill is disabled in
@@ -717,10 +728,10 @@ function MeetingButton({
       onMouseLeave={onLeave}
       aria-label={
         disabled
-          ? 'Take notes (unavailable while dictating)'
+          ? 'Capture notes (unavailable while dictating)'
           : recordingMeeting
             ? 'Stop meeting'
-            : 'Take notes'
+            : 'Capture notes'
       }
       data-hud-interactive="true"
       className={[
@@ -746,7 +757,7 @@ function MeetingButton({
         <Radio className="h-3.5 w-3.5 shrink-0" />
       )}
       <span className="text-[11px] font-medium tracking-wide">
-        {recordingMeeting ? 'Stop' : 'Take Notes'}
+        {recordingMeeting ? 'Stop' : 'Capture notes'}
       </span>
     </button>
   );
@@ -899,7 +910,7 @@ function Waveform({ bars }: { bars: readonly number[] }) {
  */
 function LoaderBars() {
   return (
-    <span className="relative inline-block h-6 w-6">
+    <span className="relative inline-block h-4 w-4">
       <style>{LOADER_KEYFRAMES}</style>
       {Array.from({ length: LOADER_BAR_COUNT }).map((_, i) => (
         <span
@@ -908,7 +919,7 @@ function LoaderBars() {
           style={{ transform: `rotate(${(i * 360) / LOADER_BAR_COUNT}deg)` }}
         >
           <span
-            className="absolute left-1/2 top-0 h-[6px] w-[2px] -translate-x-1/2 rounded-full bg-white"
+            className="absolute left-1/2 top-0 h-[4px] w-[1.5px] -translate-x-1/2 rounded-full bg-white"
             style={{
               animation: `hud-spin-fade ${LOADER_PERIOD_S}s linear infinite`,
               animationDelay: `${(-i * LOADER_PERIOD_S) / LOADER_BAR_COUNT}s`,

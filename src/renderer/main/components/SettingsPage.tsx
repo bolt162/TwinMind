@@ -14,7 +14,6 @@ import type { Hotkey } from '@core/hotkey/HotkeyTypes';
 
 export function SettingsPage() {
   const { settings, loading, save } = useSettings();
-  const [pendingSave, setPendingSave] = useState(false);
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
@@ -38,12 +37,7 @@ export function SettingsPage() {
     }
     cursor[parts[parts.length - 1]!] = value;
     setDraft(next);
-    setPendingSave(true);
-    try {
-      await save(next as Parameters<typeof save>[0]);
-    } finally {
-      setPendingSave(false);
-    }
+    await save(next as Parameters<typeof save>[0]);
   };
 
   const recording = (draft.recording ?? {}) as Record<string, unknown>;
@@ -52,8 +46,6 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      {pendingSave && <div className="text-xs text-zinc-500">Saving…</div>}
-
       <Section title="Account">
         <AccountCard />
       </Section>

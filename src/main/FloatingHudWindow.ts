@@ -32,7 +32,7 @@ const DISPLAY_MARGIN = 24;
 
 // ─── Pill geometry inside the 480 × 124 transparent window ──────────────────
 // The idle pill is the MIDDLE item in a flex group (Home + Dictate pill +
-// Take notes + 2 gaps = 220 px) that's centered horizontally. So the
+// Capture notes + 2 gaps = 220 px) that's centered horizontally. So the
 // pill sits 166–222 px from the window's left edge in idle. Drag clamping
 // keeps THIS 56 × 32 rectangle inside the cursor-nearest display's
 // workArea — the surrounding transparent surround is allowed to extend
@@ -42,7 +42,7 @@ const PILL_IDLE_WIDTH = 56;
 const PILL_IDLE_HEIGHT = 32;
 // Static layout anchor: positions the idle pill within the 480px window
 // based on the SUM of all rendered children (incl. opacity-0 siblings).
-// Idle layout: [Home(28)] + 8 + [Dictate pill(56)] + 8 + [Take Notes(~120)]
+// Idle layout: [Home(28)] + 8 + [Dictate pill(56)] + 8 + [Capture notes(~120)]
 // = 220. With justify-center, the group's left edge sits at
 // (480 - 220) / 2 = 130. The Dictate pill is the SECOND child of the
 // group, so its left edge is at group-left + Home(28) + gap(8) = 166.
@@ -54,7 +54,7 @@ const GROUP_GAP = 8;
 const PILL_OFFSET_X =
   Math.round((HUD_WIDTH - HOVER_GROUP_WIDTH) / 2) + HOME_BUTTON_WIDTH + GROUP_GAP;
 // Dynamic visible bounds in hover-idle: Home(28) + 8 gap + main pill
-// (expanded ~140) + 8 gap + Take Notes pill(~120) ≈ 304. Used only by the
+// (expanded ~140) + 8 gap + Capture notes pill(~120) ≈ 304. Used only by the
 // workArea clamping check below — if the user has the HUD dragged near
 // a screen edge, this is the bounds we don't want to overflow.
 const HOVER_GROUP_VISIBLE_WIDTH = 304;

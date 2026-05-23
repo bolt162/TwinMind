@@ -882,7 +882,7 @@ function registerPrimaryHotkey(c: ComposedApp, hotkey: Hotkey): () => void {
   // The hotkey is dictation-only. Hold-to-talk is the original short-form
   // gesture; double-tap starts a CONSTANT dictation (runs until single-tap
   // stops it). Meeting mode is no longer reachable from the hotkey — the
-  // floating "Take notes" button on the HUD is the only entry point.
+  // floating "Capture notes" button on the HUD is the only entry point.
   const gesture = new HotkeyGestureRecognizer({
     onHoldStart: () => {
       if (
@@ -1014,7 +1014,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
       onDoubleTap: () => {
         // Globe-key is dictation-only, same rules as the configurable
         // primary hotkey above. Meeting mode is only reachable via the
-        // floating "Take notes" button on the HUD.
+        // floating "Capture notes" button on the HUD.
         if (
           c.orchestrator.state === 'idle' &&
           !transcriptionUx.isBlockingNewRecording()

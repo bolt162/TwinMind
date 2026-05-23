@@ -5,7 +5,7 @@
  * entry points to recording, each tied to its own affordance:
  *   - Dictation: the configurable hotkey (hold-to-talk + double-tap-for-
  *     hands-free).
- *   - Meeting: the HUD's "Take notes" button — the only meeting entry
+ *   - Meeting: the HUD's "Capture notes" button — the only meeting entry
  *     point (the hotkey is dictation-only).
  *
  * This page just orients the user with a time-of-day greeting, the two
@@ -62,7 +62,7 @@ export function HomePage() {
             <InlineHudButton>
               <Radio className="h-3 w-3 text-white" />
               <span className="text-[10px] font-medium tracking-wide text-white">
-                Take notes
+                Capture notes
               </span>
             </InlineHudButton>{' '}
             button to start
@@ -187,8 +187,8 @@ function Kbd({ children }: { children: string }) {
 }
 
 /**
- * Mini visual of the HUD's "Take notes" pill — matches the actual labelled
- * button (icon + "Take notes" text) so the user can recognize it in the
+ * Mini visual of the HUD's "Capture notes" pill — matches the actual labelled
+ * button (icon + "Capture notes" text) so the user can recognize it in the
  * HUD when reading the meeting instructions. Smaller scale (h-5, body
  * font shrunk to 10 px) since it sits inline with body text.
  */

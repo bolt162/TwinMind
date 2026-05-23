@@ -14,7 +14,7 @@ body,
      `h-full` inside the React tree resolve to the content height
      (e.g. 32px) instead of the window height (124px for the HUD).
      That broke `items-center` positioning of the pill and caused the
-     "Take notes" tooltip to render outside the window's drawing area.
+     "Capture notes" tooltip to render outside the window's drawing area.
      The main window also wants this so the renderer can use `h-full`
      freely. */
   height: 100%;
