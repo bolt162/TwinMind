@@ -30,7 +30,11 @@ type TranscriptionUiState =
 const BAR_COUNT = 20;
 const DECAY = 0.86;
 const PILL_HEIGHT_EXPANDED = 32;
-const PILL_HEIGHT_IDLE = 22;
+// Idle pill matches the processing pill's outer shape (56 × 32) so the
+// resting state reads with the same visual weight as the working state.
+// Drag clamp + edge-anchor calc in FloatingHudWindow rely on these
+// dimensions matching `PILL_IDLE_WIDTH / HEIGHT` there — keep in sync.
+const PILL_HEIGHT_IDLE = 32;
 const PILL_HEIGHT_FAILED = 100;
 const BAR_MAX_HEIGHT_PX = 24;
 const BAR_MIN_HEIGHT_PX = 2;
@@ -490,7 +494,11 @@ export function HudApp() {
           // on hoverIdle / recording, since those have a flex-1 child
           // that fills available space (nothing to justify).
           'flex items-center justify-center gap-1 rounded-full',
-          'border border-white/40 bg-black/55 backdrop-blur-md',
+          'border border-white/40',
+          // Idle gets a SOLID black background to read as a distinct
+          // "resting" affordance; every other state keeps the translucent
+          // dark + blur combo that matches the floating-glass aesthetic.
+          visual === 'idle' ? 'bg-black' : 'bg-black/55 backdrop-blur-md',
           // shadow intentionally removed — the soft halo read as a faint
           // "box" around the buttons on transparent backdrops.
           'transition-[width,height,padding,opacity] duration-150 ease-out',
@@ -520,9 +528,9 @@ export function HudApp() {
           // — the pill itself uses `justify-start` so we'd otherwise see
           // the dot pinned to the left edge.
           <span className="mx-auto flex items-center gap-[2px]" aria-hidden>
-            <span className="block h-2 w-0.5 rounded-sm bg-white/70" />
-            <span className="block h-3 w-0.5 rounded-sm bg-white/70" />
-            <span className="block h-2 w-0.5 rounded-sm bg-white/70" />
+            <span className="block h-2 w-0.5 rounded-sm bg-white" />
+            <span className="block h-3 w-0.5 rounded-sm bg-white" />
+            <span className="block h-2 w-0.5 rounded-sm bg-white" />
           </span>
         )}
         {visual === 'hoverIdle' && (
@@ -802,11 +810,13 @@ type PillVisual =
   | 'busy'
   | 'idle';
 
-/** Pill width per visual state. Idle is tiny; failed/disconnected are widest. */
+/** Pill width per visual state. Failed/disconnected are widest. */
 function pillWidth(v: PillVisual): number {
   switch (v) {
     case 'idle':
-      return 44;
+      // Match processing's width so idle and processing share the same
+      // outer shape (= matches PILL_IDLE_WIDTH in FloatingHudWindow.ts).
+      return 56;
     case 'hoverIdle':
       // Fallback used only if hoverIdleWidth(...) isn't applied (shouldn't
       // happen — JSX overrides this for hoverIdle). Kept for completeness.

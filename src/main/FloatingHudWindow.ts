@@ -31,23 +31,24 @@ const HUD_HEIGHT = 124;
 const DISPLAY_MARGIN = 24;
 
 // ─── Pill geometry inside the 480 × 124 transparent window ──────────────────
-// The idle pill is the LEFTMOST item in a flex group (pill + Take notes +
-// Home buttons + 2 gaps = 116 px) that's centered horizontally. So the
-// pill sits 182–226 px from the window's left edge in idle. Drag clamping
-// keeps THIS 44 × 22 rectangle inside the cursor-nearest display's
+// The idle pill is the MIDDLE item in a flex group (Home + Dictate pill +
+// Take notes + 2 gaps = 220 px) that's centered horizontally. So the
+// pill sits 166–222 px from the window's left edge in idle. Drag clamping
+// keeps THIS 56 × 32 rectangle inside the cursor-nearest display's
 // workArea — the surrounding transparent surround is allowed to extend
-// past the workArea edges.
-const PILL_IDLE_WIDTH = 44;
-const PILL_IDLE_HEIGHT = 22;
+// past the workArea edges. MUST match `pillWidth('idle') / PILL_HEIGHT_IDLE`
+// in the renderer (HudApp.tsx) or the drag clamp drifts.
+const PILL_IDLE_WIDTH = 56;
+const PILL_IDLE_HEIGHT = 32;
 // Static layout anchor: positions the idle pill within the 480px window
 // based on the SUM of all rendered children (incl. opacity-0 siblings).
-// Idle layout: [Home(28)] + 8 + [Dictate pill(44)] + 8 + [Take Notes(~120)]
-// = 208. With justify-center, the group's left edge sits at
-// (480 - 208) / 2 = 136. The Dictate pill is the SECOND child of the
-// group, so its left edge is at group-left + Home(28) + gap(8) = 172.
+// Idle layout: [Home(28)] + 8 + [Dictate pill(56)] + 8 + [Take Notes(~120)]
+// = 220. With justify-center, the group's left edge sits at
+// (480 - 220) / 2 = 130. The Dictate pill is the SECOND child of the
+// group, so its left edge is at group-left + Home(28) + gap(8) = 166.
 // Get this wrong and drag clamping doesn't match the rendered pill
 // position → pill can be dragged off-screen.
-const HOVER_GROUP_WIDTH = 208;
+const HOVER_GROUP_WIDTH = 220;
 const HOME_BUTTON_WIDTH = 28;
 const GROUP_GAP = 8;
 const PILL_OFFSET_X =
@@ -57,7 +58,7 @@ const PILL_OFFSET_X =
 // workArea clamping check below — if the user has the HUD dragged near
 // a screen edge, this is the bounds we don't want to overflow.
 const HOVER_GROUP_VISIBLE_WIDTH = 304;
-const PILL_OFFSET_Y = (HUD_HEIGHT - PILL_IDLE_HEIGHT) / 2; // 51
+const PILL_OFFSET_Y = (HUD_HEIGHT - PILL_IDLE_HEIGHT) / 2; // 46
 
 // Threshold (px) for declaring the pill "near" an edge — used to flip the
 // hover-group expansion direction in the renderer. 12 px gives a small

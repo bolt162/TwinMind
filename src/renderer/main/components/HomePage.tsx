@@ -61,6 +61,9 @@ export function HomePage() {
             Hover the floating microphone, then click the{' '}
             <InlineHudButton>
               <Radio className="h-3 w-3 text-white" />
+              <span className="text-[10px] font-medium tracking-wide text-white">
+                Take notes
+              </span>
             </InlineHudButton>{' '}
             button to start
           </>,
@@ -184,14 +187,14 @@ function Kbd({ children }: { children: string }) {
 }
 
 /**
- * Mini visual of the HUD's circular dark-glass button — matches the actual
- * "Take notes" button so the user can recognize it in the HUD when reading
- * the meeting instructions. Smaller scale (h-5 w-5) since it sits inline
- * with body text.
+ * Mini visual of the HUD's "Take notes" pill — matches the actual labelled
+ * button (icon + "Take notes" text) so the user can recognize it in the
+ * HUD when reading the meeting instructions. Smaller scale (h-5, body
+ * font shrunk to 10 px) since it sits inline with body text.
  */
 function InlineHudButton({ children }: { children: React.ReactNode }) {
   return (
-    <span className="mx-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/40 bg-black/55 align-middle">
+    <span className="mx-0.5 inline-flex h-5 items-center justify-center gap-1 rounded-full border border-white/40 bg-black/55 px-1.5 align-middle">
       {children}
     </span>
   );
