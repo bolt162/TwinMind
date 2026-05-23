@@ -75,7 +75,7 @@ export interface TwinMindBackendConfig {
 const DEFAULT_DICTATION_MODEL = 'twinmind-fast';
 const DEFAULT_MEETING_MODEL = 'twinmind-pro';
 const DEFAULT_APP_URL = 'https://app.twinmind.com';
-const DEFAULT_WEB_LOGIN_URL = 'https://thirdear-webapp-third-ear-ai.vercel.app/login?via_desktop';
+const DEFAULT_WEB_LOGIN_URL = 'https://app.twinmind.com/login?via_desktop';
 
 /**
  * Result of resolving the config from the environment. The discriminated

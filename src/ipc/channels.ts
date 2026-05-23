@@ -404,7 +404,8 @@ export interface DiagnosticBundleOutput {
 /**
  * Meeting-detection diagnostic snapshot. Shown in Settings → Meeting
  * auto-detection so the user can see WHY a Meet didn't trigger a
- * notification (e.g., monitor never loaded, cooldown active, etc.).
+ * notification (e.g., monitor never loaded, same_meeting de-dup active,
+ * own capture already running, etc.).
  */
 export type MicActivityEventState =
   | 'started'

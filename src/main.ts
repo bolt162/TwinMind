@@ -1158,9 +1158,10 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
           // Trim defensively; error messages from native code can be long.
           message: msg.slice(0, 200),
         });
-        // Deliberately do NOT call recordOutcome here — that would set the
-        // 30-min cooldown. For failures we want the NEXT mic activity to
-        // retry the notification, not be silently suppressed for half an hour.
+        // Deliberately do NOT call recordOutcome here — even though the
+        // outcome no longer drives suppression, writing a fake outcome for
+        // a notification the user never saw would muddle the diagnostic
+        // activity log. The next mic-start cycle will simply retry.
       }
     });
   }

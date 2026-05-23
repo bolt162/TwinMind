@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import {
-  MEETING_COOLDOWN_MS,
   MEETING_DEBOUNCE_MS,
+  MEETING_RESET_QUIET_MS,
   MeetingDetectionService,
 } from '@core/meeting/MeetingDetectionService';
 import { JobStore } from '@core/storage/JobStore';
@@ -117,38 +117,30 @@ describe('MeetingDetectionService — suppression rules', () => {
   });
 });
 
-describe('MeetingDetectionService — cooldown', () => {
+describe('MeetingDetectionService — per-meeting de-dup', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('suppresses a second detection within the cooldown window', () => {
-    const { service, emitStart, emitStop, clock } = setup();
+  it('does not re-prompt during a single continuous meeting', () => {
+    // No mic-stop happens — the property stays HIGH for the whole call.
+    // There's no opportunity for a second debounce/consider cycle, so we
+    // get exactly one prompt regardless of how long the meeting runs.
+    const { service, emitStart } = setup();
     const detected = vi.fn();
     service.onMeetingDetected(detected);
     emitStart();
     vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
     expect(detected).toHaveBeenCalledTimes(1);
 
-    // User dismisses → cooldown starts.
-    const promptId = (detected.mock.calls[0]![0] as { promptId: string }).promptId;
-    service.recordOutcome(promptId, 'dismissed');
-
-    // 1 minute later, mic comes on again; debounce passes; still cooled down.
-    emitStop();
-    clock.advance(60_000);
-    emitStart();
-    vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+    // Even much later, with the mic still on, no second prompt fires.
+    vi.advanceTimersByTime(MEETING_RESET_QUIET_MS * 5);
     expect(detected).toHaveBeenCalledTimes(1);
-
-    // After the cooldown expires, a new mic activity does qualify.
-    emitStop();
-    clock.advance(MEETING_COOLDOWN_MS);
-    emitStart();
-    vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
-    expect(detected).toHaveBeenCalledTimes(2);
   });
 
-  it('does NOT start a cooldown when the outcome is accepted', () => {
+  it('suppresses a same-meeting glitch (brief stop+start inside the quiet window)', () => {
+    // Models the push-to-talk / mic-route-switch case: the device flips
+    // off and on inside the quiet window, so the SAME meeting continues
+    // and we must NOT re-prompt.
     const { service, emitStart, emitStop } = setup();
     const detected = vi.fn();
     service.onMeetingDetected(detected);
@@ -156,20 +148,15 @@ describe('MeetingDetectionService — cooldown', () => {
     vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
     expect(detected).toHaveBeenCalledTimes(1);
 
-    // User accepts (started the recording). Cooldown must NOT engage —
-    // accepted is not a "leave me alone" signal.
-    const promptId = (detected.mock.calls[0]![0] as { promptId: string }).promptId;
-    service.recordOutcome(promptId, 'accepted');
-
-    // Immediate next meeting (e.g. user finished one call, jumped to another)
-    // should prompt without waiting 30 min.
+    // Brief OFF, well under the reset window, then ON again.
     emitStop();
+    vi.advanceTimersByTime(MEETING_RESET_QUIET_MS / 2);
     emitStart();
     vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
-    expect(detected).toHaveBeenCalledTimes(2);
+    expect(detected).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT start a cooldown when the outcome is timed_out', () => {
+  it('prompts again after the mic is quiet long enough to count as a new meeting', () => {
     const { service, emitStart, emitStop } = setup();
     const detected = vi.fn();
     service.onMeetingDetected(detected);
@@ -177,14 +164,45 @@ describe('MeetingDetectionService — cooldown', () => {
     vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
     expect(detected).toHaveBeenCalledTimes(1);
 
-    // The notification timed out (60 s passed with no user interaction).
-    // Treat as no-preference signal — next meeting should still prompt.
-    const promptId = (detected.mock.calls[0]![0] as { promptId: string }).promptId;
-    service.recordOutcome(promptId, 'timed_out');
-
+    // Real meeting-end gap: continuous OFF past the reset window.
     emitStop();
+    vi.advanceTimersByTime(MEETING_RESET_QUIET_MS);
+
+    // Next mic-start is treated as a fresh meeting.
     emitStart();
     vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
     expect(detected).toHaveBeenCalledTimes(2);
+  });
+
+  it('recordOutcome no longer drives suppression (any outcome behaves the same)', () => {
+    // After we removed the cooldown, recordOutcome is purely an
+    // activity-log write. Dismissed/accepted/timed_out all behave the
+    // same w.r.t. when the next prompt can fire — only the quiet-window
+    // de-dup decides that.
+    for (const outcome of ['dismissed', 'accepted', 'timed_out'] as const) {
+      const { service, emitStart, emitStop } = setup();
+      const detected = vi.fn();
+      service.onMeetingDetected(detected);
+
+      emitStart();
+      vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+      expect(detected).toHaveBeenCalledTimes(1);
+      const promptId = (detected.mock.calls[0]![0] as { promptId: string }).promptId;
+      service.recordOutcome(promptId, outcome);
+
+      // Within the quiet window → suppressed regardless of outcome.
+      emitStop();
+      vi.advanceTimersByTime(MEETING_RESET_QUIET_MS / 2);
+      emitStart();
+      vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+      expect(detected, `outcome=${outcome}: same meeting must not re-prompt`).toHaveBeenCalledTimes(1);
+
+      // Past the quiet window → prompts again regardless of outcome.
+      emitStop();
+      vi.advanceTimersByTime(MEETING_RESET_QUIET_MS);
+      emitStart();
+      vi.advanceTimersByTime(MEETING_DEBOUNCE_MS);
+      expect(detected, `outcome=${outcome}: new meeting must prompt`).toHaveBeenCalledTimes(2);
+    }
   });
 });
