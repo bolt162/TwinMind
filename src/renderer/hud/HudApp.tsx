@@ -405,18 +405,12 @@ export function HudApp() {
     document.addEventListener('mouseup', onUp);
   };
 
-  // The main pill drives DICTATION only. If a meeting is recording, the
-  // pill is non-interactive — the user must stop the meeting first (via
-  // the "Capture notes" button next to it).
-  const pillDisabled = isRecording && mode === 'meeting';
-
   const onPillClick = () => {
     if (dragMoved.current) {
       dragMoved.current = false;
       return;
     }
     if (isBusy) return;
-    if (pillDisabled) return;
     // Banner up → the only valid actions are the Open settings / Dismiss
     // buttons inside the banner (they stopPropagation). A click on the
     // pill body itself would otherwise re-fire startDictation → re-push
@@ -426,6 +420,11 @@ export function HudApp() {
       void window.electronAPI.recording.startDictation().catch(() => {});
     } else if (isRecording && mode === 'dictation') {
       void window.electronAPI.recording.stopDictation().catch(() => {});
+    } else if (isRecording && mode === 'meeting') {
+      const sid = sessionIdRef.current;
+      if (sid) {
+        void window.electronAPI.recording.stopMeeting({ sessionId: sid }).catch(() => {});
+      }
     }
     // For 'processing' and 'failed' states, clicks on the pill itself are no-ops
     // — the retry/history buttons inside the pill are what the user touches.
@@ -474,7 +473,7 @@ export function HudApp() {
         data-hud-interactive="true"
         aria-label={
           visual === 'recording'
-            ? 'Stop dictation'
+            ? (mode === 'meeting' ? 'Stop meeting' : 'Stop dictation')
             : visual === 'failed'
               ? 'Transcription failed; retry or open history'
               : visual === 'processing'
@@ -495,24 +494,17 @@ export function HudApp() {
           // that fills available space (nothing to justify).
           'flex items-center justify-center gap-1 rounded-full',
           'border border-white/40',
-          // Idle gets a SOLID black background to read as a distinct
-          // "resting" affordance; every other state keeps the translucent
-          // dark + blur combo that matches the floating-glass aesthetic.
-          visual === 'idle' ? 'bg-black' : 'bg-black/55 backdrop-blur-md',
-          // shadow intentionally removed — the soft halo read as a faint
-          // "box" around the buttons on transparent backdrops.
+          'bg-black',
           'transition-[width,height,padding,opacity] duration-150 ease-out',
           'overflow-hidden text-white select-none cursor-grab active:cursor-grabbing',
-          // Faded + non-cursor when a meeting is recording. The button stays
-          // hit-detectable (so the HUD's hover-reveal still works), but the
-          // click handler short-circuits via `pillDisabled` above.
-          pillDisabled ? 'opacity-40 cursor-not-allowed' : '',
           visual === 'failed' ||
           visual === 'disconnected' ||
           visual === 'dictationLimit' ||
           visual === 'micPermission'
             ? 'px-6 py-4 items-stretch'
-            : 'px-2',
+            : visual === 'recording'
+              ? 'px-3'
+              : 'px-2',
         ].join(' ')}
         style={{
           // Hover-idle width grows with the hotkey label so long bindings
@@ -523,15 +515,7 @@ export function HudApp() {
         }}
       >
         {visual === 'idle' && (
-          // Three vertical bars (longer middle) reading as a small EQ /
-          // mic-active glyph. `mx-auto` centers the group inside the pill
-          // — the pill itself uses `justify-start` so we'd otherwise see
-          // the dot pinned to the left edge.
-          <span className="mx-auto flex items-center gap-[2px]" aria-hidden>
-            <span className="block h-3 w-[3px] rounded-sm bg-white" />
-            <span className="block h-4 w-[3px] rounded-sm bg-white" />
-            <span className="block h-3 w-[3px] rounded-sm bg-white" />
-          </span>
+          <Mic className="mx-auto h-4 w-4 text-white" aria-hidden />
         )}
         {visual === 'hoverIdle' && (
           // Fade the contents in AFTER the pill's 150ms width transition has
@@ -566,17 +550,10 @@ export function HudApp() {
         )}
         {visual === 'recording' && (
           <>
-            {/* Dictation-only stop indicator. The pill IS the stop affordance
-                (clicking it stops the dictation), so the red square mirrors
-                the same idiom the Capture-notes button uses for its stop
-                state. Meetings don't get this — their stop affordance is on
-                the Capture-notes button instead and the main pill is dimmed. */}
-            {mode === 'dictation' && (
-              <span
-                className="h-2 w-2 shrink-0 rounded-[1px] bg-red-500"
-                aria-hidden
-              />
-            )}
+            <span
+              className="h-2 w-2 shrink-0 rounded-[1px] bg-red-500"
+              aria-hidden
+            />
             <Waveform bars={barsRef.current} />
             <span className="shrink-0 text-[11px] font-medium tabular-nums text-white/85">
               {formatElapsed(elapsedSec)}
@@ -606,31 +583,21 @@ export function HudApp() {
       </button>
       {/*
         Conditional render — not just opacity-0 — so Capture notes is COMPLETELY
-        gone from the DOM/layout during dictation. opacity-0 left a
-        transparent, layout-occupying ghost the user could perceive; this
-        removes the element entirely. Pops back into the layout when
-        dictation ends (no transition; instant reappearance).
+        gone from the DOM/layout whenever a recording session is active (either
+        mode). The main pill IS the stop affordance for both modes, so this
+        button is start-only. Pops back into the layout when the session
+        ends (no transition; instant reappearance).
       */}
-      {!(isRecording && mode === 'dictation') && (
+      {recording === 'idle' && (
       <MeetingButton
-        // Visibility rules (within the conditional-render gate above):
-        //   - Recording meeting: ALWAYS visible (it's the stop affordance).
-        //   - Not recording: shown when the HUD group is hovered, UNLESS
-        //     a banner is up — Capture notes shouldn't compete with the
-        //     banner's own buttons. (None of the banner states fire
-        //     mid-recording today, so the carve-out is defensive.)
-        visible={(hovered && !bannerVisible) || (isRecording && mode === 'meeting')}
+        visible={hovered && !bannerVisible}
         // Drag plumbing — share the parent's drag refs so Capture notes is a
         // valid grab-handle for moving the HUD, same as the Dictate pill.
         // getDragMoved/clearDragMoved let handleClick suppress its own
-        // start/stop action when a drag ended over the button.
+        // start action when a drag ended over the button.
         onMouseDown={onMouseDown}
         getDragMoved={() => dragMoved.current}
         clearDragMoved={() => { dragMoved.current = false; }}
-        // Non-clickable while a dictation is recording. Pointer-events go
-        // through, click handler is unreachable, no tooltip on hover.
-        disabled={isRecording && mode === 'dictation'}
-        recordingMeeting={isRecording && mode === 'meeting'}
         canStart={recording === 'idle' && txState.kind === 'idle'}
         onEnter={() => setGroupHovered(true)}
         onLeave={() => setGroupHovered(false)}
@@ -642,14 +609,6 @@ export function HudApp() {
             })
             .catch(() => {});
         }}
-        onStop={() => {
-          const sid = sessionIdRef.current;
-          if (sid) {
-            void window.electronAPI.recording
-              .stopMeeting({ sessionId: sid })
-              .catch(() => {});
-          }
-        }}
       />
       )}
       </div>
@@ -658,44 +617,26 @@ export function HudApp() {
 }
 
 /**
- * "Capture notes" — the only entry point for meeting mode. A pill-shaped
- * button that sits alongside the main dictation pill, mirroring its
- * icon+label visual language so the two entry points feel like
- * siblings. Three states:
- *
- *   idle / not recording   →  Radio icon + "Capture notes" label.
- *                             Click starts a meeting.
- *   recording (this mode)  →  Red dot + "Stop" label. Click stops the
- *                             meeting. (Dictation pill is disabled in
- *                             this state, so this button is the only
- *                             affordance for ending the recording.)
- *   disabled (dictating)   →  Faded; pointer-events: none.
- *
- * No tooltip — the label is always visible inside the pill, so the
- * separate floating tooltip that the icon-only version needed is
- * redundant.
+ * "Capture notes" — the start-only entry point for meeting mode. Renders
+ * only while no session is active; clicking it starts a meeting, after
+ * which the main pill takes over as the recording HUD (waveform + timer +
+ * red stop square) and stops the meeting on click.
  */
 function MeetingButton({
   visible,
-  disabled,
-  recordingMeeting,
   canStart,
   onEnter,
   onLeave,
   onStart,
-  onStop,
   onMouseDown,
   getDragMoved,
   clearDragMoved,
 }: {
   visible: boolean;
-  disabled: boolean;
-  recordingMeeting: boolean;
   canStart: boolean;
   onEnter: () => void;
   onLeave: () => void;
   onStart: () => void;
-  onStop: () => void;
   /** Forwarded from HudApp so dragging from this button moves the window. */
   onMouseDown?: React.MouseEventHandler<HTMLButtonElement>;
   /** Lets us check whether the just-completed gesture was a drag. */
@@ -706,14 +647,9 @@ function MeetingButton({
   const handleClick = () => {
     // Same guard as the main pill: if the user dragged the HUD while
     // holding this button, the mouseup fires a click — swallow it so the
-    // drag-to-reposition gesture doesn't also start/stop a meeting.
+    // drag-to-reposition gesture doesn't also start a meeting.
     if (getDragMoved?.()) {
       clearDragMoved?.();
-      return;
-    }
-    if (disabled) return;
-    if (recordingMeeting) {
-      onStop();
       return;
     }
     if (canStart) onStart();
@@ -726,38 +662,23 @@ function MeetingButton({
       onMouseDown={onMouseDown}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
-      aria-label={
-        disabled
-          ? 'Capture notes (unavailable while dictating)'
-          : recordingMeeting
-            ? 'Stop meeting'
-            : 'Capture notes'
-      }
+      aria-label="Capture notes"
       data-hud-interactive="true"
       className={[
         // h-8 (32 px) intentionally matches PILL_HEIGHT_EXPANDED on the
         // main pill so the two pills sit at the same baseline in
         // hoverIdle. Previously h-7 (28 px) made them visibly mismatched.
         'flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3',
-        'border border-white/40 bg-black/55 backdrop-blur-md',
+        'border border-white/40 bg-black',
         'transition-opacity duration-150',
-        disabled
-          ? 'pointer-events-none opacity-40 text-white/40'
-          : visible || recordingMeeting
-            ? 'opacity-100 text-white/85 hover:text-white hover:bg-black/70'
-            : 'pointer-events-none opacity-0 text-white/85',
+        visible
+          ? 'opacity-100 text-white/85 hover:text-white'
+          : 'pointer-events-none opacity-0 text-white/85',
       ].join(' ')}
     >
-      {recordingMeeting ? (
-        // Filled red square = standard "stop" affordance. rounded-[1px]
-        // softens the corners just a hair so it doesn't look like a dead
-        // pixel; full sharp corners look broken at this size.
-        <span className="h-2 w-2 shrink-0 rounded-[1px] bg-red-500" />
-      ) : (
-        <Radio className="h-3.5 w-3.5 shrink-0" />
-      )}
+      <Radio className="h-3.5 w-3.5 shrink-0" />
       <span className="text-[11px] font-medium tracking-wide">
-        {recordingMeeting ? 'Stop' : 'Capture notes'}
+        Capture notes
       </span>
     </button>
   );
@@ -795,10 +716,8 @@ function HomeButton({
       data-hud-interactive="true"
       className={[
         'flex h-7 w-7 shrink-0 items-center justify-center rounded-full',
-        'border border-white/40 bg-black/55 backdrop-blur-md',
-        // shadow intentionally removed — the soft halo read as a faint
-        // "box" around the Home button on transparent backdrops.
-        'text-white/80 hover:text-white hover:bg-black/70',
+        'border border-white/40 bg-black',
+        'text-white/80 hover:text-white',
         'transition-opacity duration-150',
         visible ? 'opacity-100' : 'pointer-events-none opacity-0',
       ].join(' ')}
@@ -835,7 +754,7 @@ function pillWidth(v: PillVisual): number {
     case 'busy':
       return 80;
     case 'recording':
-      return 140;
+      return 148;
     case 'processing':
       return 56;
     case 'failed':

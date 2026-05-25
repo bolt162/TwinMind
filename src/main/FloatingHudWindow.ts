@@ -82,7 +82,7 @@ const VISUAL_BOUNDS: Record<HudPillVisual, { width: number; height: number }> = 
   idle: { width: PILL_IDLE_WIDTH, height: PILL_IDLE_HEIGHT },
   hoverIdle: { width: HOVER_GROUP_VISIBLE_WIDTH, height: 28 },
   busy: { width: 80, height: 32 },
-  recording: { width: 140, height: 32 },
+  recording: { width: 148, height: 32 },
   processing: { width: 60, height: 32 },
   failed: { width: 400, height: 100 },
   dictationLimit: { width: 400, height: 100 },
