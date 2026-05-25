@@ -505,7 +505,7 @@ function buildAsrClient(
     : {
         transcribeUrl: 'about:blank',
         vercelProtectionBypass: '',
-        dictationModel: 'twinmind-fast',
+        dictationModel: 'twinmind-fast-3',
         meetingModel: 'twinmind-pro',
         summaryUrl: 'about:blank',
         appUrl: 'https://app.twinmind.com',

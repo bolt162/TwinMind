@@ -59,8 +59,7 @@ export interface TwinMindBackendConfig {
   readonly webLoginUrl: string;
   /**
    * Model identifier sent as the `model` form field for dictation chunks.
-   * Defaults to V1's value `twinmind-fast`; override via
-   * `TWINMIND_DICTATION_MODEL`.
+   * Defaults to `twinmind-fast-3`; override via `TWINMIND_DICTATION_MODEL`.
    */
   readonly dictationModel: string;
   /**
@@ -72,7 +71,7 @@ export interface TwinMindBackendConfig {
 }
 
 /** V1's per-mode defaults. Override via env to A/B against other backend models. */
-const DEFAULT_DICTATION_MODEL = 'twinmind-fast';
+const DEFAULT_DICTATION_MODEL = 'twinmind-fast-3';
 const DEFAULT_MEETING_MODEL = 'twinmind-pro';
 const DEFAULT_APP_URL = 'https://app.twinmind.com';
 const DEFAULT_WEB_LOGIN_URL = 'https://app.twinmind.com/login?via_desktop';

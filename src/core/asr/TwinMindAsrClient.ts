@@ -81,6 +81,19 @@ export interface TwinMindAsrClientDeps {
 
 /** Floor for the per-request timeout: covers network + small-chunk transcribe. */
 const BASE_TIMEOUT_MS = 30_000;
+
+/**
+ * Backend-side cleanup instruction sent in the `prompt` form field for
+ * every dictation chunk. The backend uses this to post-process the raw
+ * transcript before returning it: strip filler words, resolve
+ * self-corrections, add punctuation / casing / paragraph breaks, light
+ * grammar fixes — without changing meaning or formalising the voice.
+ * Kept verbatim so a quick search ("Rewrite this voice dictation") lands
+ * exactly here.
+ */
+const DICTATION_CLEANUP_PROMPT = `Rewrite this voice dictation as clean, ready-to-send text.
+
+Remove filler words like “um,” “uh,” “like,” “you know,” and “basically.” Resolve self-corrections and false starts. Add punctuation, capitalization, paragraph breaks, and list formatting where natural. Improve grammar and readability without changing the meaning or making it sound too formal. Keep my voice. Add emojis only if they fit the emotion or were requested.`;
 /**
  * Extra wall-time budget allowed per second of audio. Whisper-class models
  * transcribe at ~10–30× realtime; 500 ms/audio-sec is roughly 2× the
@@ -216,14 +229,15 @@ export class TwinMindAsrClient implements IAsrClient {
     // were in when the chunk was captured. Defaults to "UTC" if Intl
     // returns nothing usable — unlikely on macOS, but defensive.
     form.append('timezone', resolveSystemTimezone());
-    // Per-mode model selection. Meeting mode pins `twinmind-pro` (V1
-    // behavior). Dictation now OMITS the `model` field entirely so the
-    // backend's `/api/v2/transcribe/choose` endpoint picks its default —
-    // we're testing whether `twinmind-fast` was the cause of dropped
-    // first-words. To revert: re-add the dictation branch sending
-    // `this.config.dictationModel`.
+    // Per-mode model selection. Meeting pins `twinmind-pro`; dictation
+    // pins `twinmind-fast-3` (or whatever `TWINMIND_DICTATION_MODEL`
+    // overrides it to). Both are sent explicitly so the backend's
+    // `/api/v2/transcribe/choose` endpoint doesn't fall back to its
+    // own default selection.
     if (req.mode === 'meeting') {
       form.append('model', this.config.meetingModel);
+    } else {
+      form.append('model', this.config.dictationModel);
     }
     // Dictation-only marker so the backend can route / analyze quick
     // dictation traffic separately from meeting traffic. Meeting calls
@@ -244,7 +258,20 @@ export class TwinMindAsrClient implements IAsrClient {
     form.append('log_data', req.mode === 'meeting' ? 'true' : 'false');
     form.append('log_audio', 'false');
     if (req.language) form.append('language', req.language);
-    if (req.contextHint) form.append('prompt', req.contextHint);
+    // `prompt` semantics differ by mode:
+    //   - dictation: a cleanup instruction the backend applies to the
+    //     transcribed text (filler removal, punctuation, casing, light
+    //     formatting) — sent on every dictation chunk. Overrides the
+    //     contextHint priming for dictation; the cleanup instruction
+    //     is the higher-value use of the field for short utterances.
+    //   - meeting: ASR priming with the tail of the previous chunk's
+    //     transcript (improves cross-chunk continuity) — sent only when
+    //     `contextHint` is populated.
+    if (req.mode === 'dictation') {
+      form.append('prompt', DICTATION_CLEANUP_PROMPT);
+    } else if (req.contextHint) {
+      form.append('prompt', req.contextHint);
+    }
 
     const controller = new AbortController();
     const requestTimeoutMs = this.computeRequestTimeoutMs(req);

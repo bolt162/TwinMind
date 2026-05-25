@@ -143,6 +143,19 @@ function routeAuthCallback(url: string): void {
     return;
   }
   shell.authProvider.deliverAuthCallback(url);
+  // Bring TwinMind back to the foreground. The OAuth round-trip handed
+  // focus to the system browser; without these the app stays behind and
+  // the user has to click the dock icon (or our window in the background)
+  // themselves to see the post-sign-in state. `app.focus({ steal: true })`
+  // is the canonical Electron pattern for "OAuth handoff complete, claim
+  // foreground from the browser" — plain `.focus()` only raises within
+  // our own app, not from another foreground app.
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    showMainWindowOnCurrentSpace(mainWindow);
+    mainWindow.focus();
+  }
 }
 
 // macOS routes deep links through this event for both cold-launch (queued

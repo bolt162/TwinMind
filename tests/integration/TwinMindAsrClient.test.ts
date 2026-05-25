@@ -58,7 +58,7 @@ function buildClient(responses: QueuedResponse[]) {
     config: {
       transcribeUrl: 'https://api.example/api/v2/transcribe',
       vercelProtectionBypass: 'bypass',
-      dictationModel: 'twinmind-fast',
+      dictationModel: 'twinmind-fast-3',
       meetingModel: 'twinmind-pro',
     },
     auth,
@@ -99,12 +99,12 @@ describe('TwinMindAsrClient', () => {
     expect(calls[0]?.auth).toBe('Bearer TOK_1');
   });
 
-  it('omits the model field on dictation requests (backend /choose picks default)', async () => {
+  it('sends the configured dictation model on dictation requests', async () => {
     const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }]);
     const req = { ...makeReq(audioPath), mode: 'dictation' as const, source: 'mic' as const };
     await client.transcribe(req);
     const body = calls[0]?.init?.body as FormData;
-    expect(body.get('model')).toBeNull();
+    expect(body.get('model')).toBe('twinmind-fast-3');
   });
 
   it('sends the meeting model on mixed/meeting requests', async () => {
@@ -112,6 +112,27 @@ describe('TwinMindAsrClient', () => {
     await client.transcribe(makeReq(audioPath));
     const body = calls[0]?.init?.body as FormData;
     expect(body.get('model')).toBe('twinmind-pro');
+  });
+
+  it('attaches the dictation cleanup prompt on every dictation request', async () => {
+    const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }]);
+    const req = { ...makeReq(audioPath), mode: 'dictation' as const, source: 'mic' as const };
+    await client.transcribe(req);
+    const body = calls[0]?.init?.body as FormData;
+    const prompt = body.get('prompt');
+    expect(typeof prompt).toBe('string');
+    // Tag the test by a stable phrase the cleanup instruction starts with.
+    // Full text is a long multi-paragraph instruction; substring match keeps
+    // the test resilient to whitespace tweaks.
+    expect(String(prompt)).toContain('Rewrite this voice dictation');
+  });
+
+  it('does not attach a dictation-cleanup prompt on meeting requests', async () => {
+    const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }]);
+    // Meeting request with no contextHint — prompt must be absent.
+    await client.transcribe(makeReq(audioPath));
+    const body = calls[0]?.init?.body as FormData;
+    expect(body.get('prompt')).toBeNull();
   });
 
   it('prefers the response-reported modelVersion over the requested model', async () => {
