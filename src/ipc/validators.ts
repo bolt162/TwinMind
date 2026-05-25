@@ -200,6 +200,38 @@ const wizardGetStatusOutput = z.object({
   onboardingCompletedAt: z.number().int().nonnegative().nullable(),
 });
 
+// ─── Update ──────────────────────────────────────────────────────────────────
+
+const updatePhase = z.enum([
+  'idle',
+  'checking',
+  'available',
+  'downloading',
+  'ready',
+  'error',
+]);
+
+const updateStateChanged = z.object({
+  phase: updatePhase,
+  // Semver string; bound loose since electron-updater may include build
+  // metadata. We don't parse it here — just validate length.
+  version: z.string().min(1).max(64).nullable(),
+  progressPercent: z.number().min(0).max(100).nullable(),
+  error: z
+    .object({
+      code: z.enum(['network', 'integrity', 'signature', 'unknown']),
+      message: z.string().max(4096),
+    })
+    .nullable(),
+  disabled: z.boolean(),
+  currentVersion: z.string().min(1).max(64),
+});
+
+const updateQuitAndInstallOutput = z.object({
+  ok: z.boolean(),
+  error: z.enum(['recording_active', 'not_ready']).optional(),
+});
+
 /** Map of push channel → payload schema. Used by `bridge.main.broadcast()`. */
 export const PushSchemas = {
   [PUSH.RECORDING_STATE]: recordingStateChanged,
@@ -223,6 +255,7 @@ export const PushSchemas = {
   [PUSH.MIC_PERMISSION_REQUIRED]: z.object({
     mode: z.enum(['dictation', 'meeting']),
   }),
+  [PUSH.UPDATE_STATE_CHANGED]: updateStateChanged,
 } as const;
 
 // ─── REQUEST schemas (input + output per channel) ────────────────────────────
@@ -425,6 +458,9 @@ export const RequestSchemas = {
   [REQUEST.SESSION_RETRY_SUMMARY]: { input: sessionRetrySummaryInput, output: empty },
   [REQUEST.SESSION_OPEN_SUMMARY]: { input: sessionOpenSummaryInput, output: empty },
   [REQUEST.REC_DICTATION_LIMIT_DISMISS]: { input: empty, output: empty },
+  [REQUEST.UPDATE_GET_STATE]: { input: empty, output: updateStateChanged },
+  [REQUEST.UPDATE_CHECK_NOW]: { input: empty, output: empty },
+  [REQUEST.UPDATE_QUIT_AND_INSTALL]: { input: empty, output: updateQuitAndInstallOutput },
 } as const;
 
 export type RequestChannelName = keyof typeof RequestSchemas;

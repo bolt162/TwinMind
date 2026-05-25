@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Radio, Sparkles } from 'lucide-react';
+import { Download, Radio, Sparkles } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 export function HomePage() {
@@ -29,6 +29,7 @@ export function HomePage() {
 
   return (
     <section className="mx-auto flex h-full max-w-2xl flex-col gap-6 py-2">
+      <UpdateBanner />
       <header>
         <h1 className="font-serif text-4xl font-light tracking-tight text-zinc-50">
           {greeting}
@@ -197,5 +198,93 @@ function InlineHudButton({ children }: { children: React.ReactNode }) {
     <span className="mx-0.5 inline-flex h-5 items-center justify-center gap-1 rounded-full border border-white/40 bg-black/55 px-1.5 align-middle">
       {children}
     </span>
+  );
+}
+
+/**
+ * UpdateBanner — only renders when a downloaded update is sitting `ready`.
+ *
+ * Recording-active state: the Restart & Update button is replaced with a
+ * disabled "Finish your recording first" affordance. The main-side
+ * UpdateService also refuses the install in that case — both gates exist so
+ * a user clicking the button between renderer state-sync and orchestrator
+ * state-read doesn't slip through.
+ *
+ * Spec §6: "If the YAML's version equals the running app's version… no
+ * banner, no download." The banner is gated on phase === 'ready' which only
+ * happens after a real download finished, so this is implicit.
+ */
+function UpdateBanner() {
+  type State = Awaited<ReturnType<typeof window.electronAPI.update.getState>>;
+  const [state, setState] = useState<State | null>(null);
+  const [recordingActive, setRecordingActive] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void window.electronAPI.update.getState().then((s) => {
+      if (alive) setState(s);
+    });
+    const offUpdate = window.electronAPI.on.updateStateChanged((s) => {
+      if (alive) setState(s);
+    });
+    const offRec = window.electronAPI.on.recordingStateChanged((e) => {
+      if (!alive) return;
+      // `recording` / `starting` / `stopping` all count — anything mid-flight
+      // where killing the process would orphan an in-progress chunk.
+      setRecordingActive(
+        e.state === 'recording' || e.state === 'starting' || e.state === 'stopping',
+      );
+    });
+    return () => {
+      alive = false;
+      offUpdate();
+      offRec();
+    };
+  }, []);
+
+  if (!state || state.phase !== 'ready') return null;
+
+  const onInstall = async () => {
+    setSubmitting(true);
+    try {
+      // If main refuses with recording_active (race between renderer state
+      // and orchestrator state), the response carries the typed error and
+      // the banner stays put. The recording-state listener will flip the
+      // banner copy back to the "finish recording first" form within
+      // milliseconds anyway.
+      const r = await window.electronAPI.update.quitAndInstall();
+      if (!r.ok && r.error === 'recording_active') {
+        setRecordingActive(true);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-emerald-700/60 bg-emerald-950/40 px-4 py-2.5">
+      <Download className="h-4 w-4 shrink-0 text-emerald-400" />
+      <div className="flex-1 text-sm">
+        {recordingActive ? (
+          <span className="text-zinc-200">
+            Update ready — finish your recording first.
+          </span>
+        ) : (
+          <span className="text-zinc-200">
+            TwinMind {state.version} is ready to install.
+          </span>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => void onInstall()}
+        disabled={recordingActive || submitting}
+        className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+        title={recordingActive ? 'Stop your recording, then click to install.' : undefined}
+      >
+        {submitting ? 'Restarting…' : 'Restart & Update'}
+      </button>
+    </div>
   );
 }

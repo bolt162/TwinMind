@@ -101,6 +101,11 @@ declare global {
         getStatus(): Promise<RequestPayloads['wizard.getStatus']['output']>;
         complete(): Promise<Record<string, never>>;
       };
+      readonly update: {
+        getState(): Promise<RequestPayloads['update.getState']['output']>;
+        checkNow(): Promise<Record<string, never>>;
+        quitAndInstall(): Promise<RequestPayloads['update.quitAndInstall']['output']>;
+      };
       readonly on: {
         recordingStateChanged(
           cb: (e: PushPayloads['recording_state_changed']) => void,
@@ -149,6 +154,9 @@ declare global {
         ): () => void;
         micPermissionRequired(
           cb: (e: PushPayloads['mic_permission_required']) => void,
+        ): () => void;
+        updateStateChanged(
+          cb: (e: PushPayloads['update_state_changed']) => void,
         ): () => void;
       };
     };

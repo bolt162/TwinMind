@@ -66,6 +66,7 @@ import type { IMicActivityMonitor } from '@platform/IMicActivityMonitor';
 import type { IGlobeKeyManager } from '@platform/IGlobeKeyManager';
 import { hotkeysEqual, type Hotkey } from '@core/hotkey/HotkeyTypes';
 import { resolveAudioteeBinaryPath } from '@platform/audioteeBinaryPath';
+import { UpdateService } from '@core/update/UpdateService';
 
 // userData folder. Set explicitly (rather than letting Electron derive from
 // productName) so it stays "TwinMind" across product renames and is easy to
@@ -190,6 +191,7 @@ let audioProcessHandle: UtilityProcess | null = null;
 let audioPort: MessagePortMain | null = null;
 let bridge: IpcBridgeMain | null = null;
 let tray: TrayManager | null = null;
+let updateService: UpdateService | null = null;
 
 /**
  * Machine-scoped UI gate. True once the wizard has been completed at least
@@ -511,6 +513,35 @@ function wireIpc(b: IpcBridgeMain): void {
         hasRefreshToken: u.hasRefreshToken,
       })),
     };
+  });
+
+  // ── Update (always available — UpdateService is shell-scoped) ────────────
+  // Disabled in dev / non-darwin — the service short-circuits internally and
+  // returns a `disabled: true` state snapshot, so handlers below never have
+  // to special-case that path.
+  b.handle(REQUEST.UPDATE_GET_STATE, () => {
+    if (!updateService) {
+      // Shell not yet built — return a synthetic disabled snapshot. The
+      // renderer subscribes to UPDATE_STATE_CHANGED for the real one.
+      return {
+        phase: 'idle' as const,
+        version: null,
+        progressPercent: null,
+        error: null,
+        disabled: true,
+        currentVersion: app.getVersion(),
+      };
+    }
+    return updateService.getState();
+  });
+  b.handle(REQUEST.UPDATE_CHECK_NOW, () => {
+    updateService?.checkNow();
+    return {};
+  });
+  b.handle(REQUEST.UPDATE_QUIT_AND_INSTALL, () => {
+    if (!updateService) return { ok: false, error: 'not_ready' as const };
+    const r = updateService.quitAndInstall();
+    return r.error ? { ok: r.ok, error: r.error } : { ok: r.ok };
   });
 
   // ── Wizard (always available — touches globalDb) ─────────────────────────
@@ -1584,6 +1615,26 @@ function broadcastAuthState(): void {
   }
 }
 
+/**
+ * Broadcast the latest update-service state to every renderer. Called both
+ * from UpdateService's onStateChange callback and from did-finish-load on
+ * the main window so a freshly-opened renderer can seed its UI without
+ * waiting for the next transition.
+ */
+function broadcastUpdateState(): void {
+  if (!bridge || !updateService) return;
+  const payload = updateService.getState();
+  const targets: WebContents[] = [];
+  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  for (const wc of targets) {
+    try {
+      bridge.broadcast(wc, PUSH.UPDATE_STATE_CHANGED, payload);
+    } catch {
+      /* renderer gone */
+    }
+  }
+}
+
 // ─── System-audio probe (unchanged from previous main.ts) ──────────────────
 
 async function probeSystemAudio(logger: Shell['logger']): Promise<boolean> {
@@ -1717,6 +1768,21 @@ app.whenReady().then(async () => {
   shell = buildShell({ audioLink, platform, appVersion: app.getVersion() });
   shell.platform.deviceMonitor.start();
 
+  // 2b. Auto-update service. Machine-scoped (no per-user state). Disabled
+  // automatically in dev / non-darwin. The recording guard reads orchestrator
+  // state through a closure — sign-out leaves `composed` null which the
+  // closure treats as "not recording", which is correct.
+  updateService = new UpdateService({
+    logger: shell.logger,
+    analytics: shell.analytics,
+    appVersion: shell.appVersion,
+    isRecording: () => {
+      const s = composed?.orchestrator.state;
+      return s === 'recording' || s === 'starting' || s === 'stopping';
+    },
+  });
+  updateService.onStateChange(() => broadcastUpdateState());
+
   // If a twinmind:// link was clicked before the shell finished initializing
   // (cold-launch via deep link), drain it now so the in-flight signIn picks
   // it up. A no-op if signIn() isn't waiting — the provider just logs it.
@@ -1740,6 +1806,14 @@ app.whenReady().then(async () => {
         message: err instanceof Error ? err.message : String(err),
       });
     }
+    // Spec §6: update checks only run for authenticated users. Start the
+    // scheduler when a user signs in; stop it on sign-out so we don't poll
+    // the endpoint unauthenticated. Both calls are idempotent.
+    if (userId !== null) {
+      updateService?.startScheduler();
+    } else {
+      updateService?.stopScheduler();
+    }
     broadcastAuthState();
   });
 
@@ -1756,6 +1830,9 @@ app.whenReady().then(async () => {
         message: err instanceof Error ? err.message : String(err),
       });
     }
+    // Same gate as the auth-change listener: start the update scheduler now
+    // for the rehydrated session. onAuthChange doesn't fire on rehydrate.
+    updateService.startScheduler();
   }
 
   // 7. Create the HUD + main window + tray. HUD honors `onboardingComplete`.
@@ -1780,9 +1857,12 @@ app.whenReady().then(async () => {
   tray = new TrayManager({ onOpenHome: () => openHome(), logger: shell.logger });
   tray.init();
 
-  // 8. Broadcast initial auth state once the renderer can subscribe.
+  // 8. Broadcast initial auth + update state once the renderer can subscribe.
   if (mainWindow) {
-    mainWindow.webContents.once('did-finish-load', () => broadcastAuthState());
+    mainWindow.webContents.once('did-finish-load', () => {
+      broadcastAuthState();
+      broadcastUpdateState();
+    });
   }
 });
 
@@ -1806,6 +1886,18 @@ app.on('before-quit', async (event) => {
       /* best-effort */
     }
     composed = null;
+  }
+  // Tear down the update service BEFORE shell.shutdown() so its timers stop
+  // firing during teardown. When this quit was triggered by quitAndInstall,
+  // the squirrel installer is waiting for our process to exit — anything
+  // that delays `app.exit(0)` below also delays the in-place swap.
+  if (updateService) {
+    try {
+      await updateService.shutdown();
+    } catch {
+      /* best-effort */
+    }
+    updateService = null;
   }
   await shell.shutdown();
   shell = null;

@@ -31,7 +31,13 @@ export type AnalyticsEvent =
   | 'settings_changed'
   | 'diagnostic_bundle_exported'
   | 'data_deleted'
-  | 'installer_completed';
+  | 'installer_completed'
+  | 'update_check_started'
+  | 'update_available'
+  | 'update_downloaded'
+  | 'update_install_clicked'
+  | 'update_install_blocked_by_recording'
+  | 'update_error';
 
 export interface IAnalyticsClient {
   /** Identify the user (anon device id is fine — never email). */

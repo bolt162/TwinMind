@@ -40,6 +40,13 @@ export const PUSH = {
    * silently firing the native prompt under the user.
    */
   MIC_PERMISSION_REQUIRED: 'mic_permission_required',
+  /**
+   * App-update state machine, broadcast by UpdateService. One push per
+   * transition (idle/checking/available/downloading/ready/error). The
+   * renderer mirrors this into Settings → Updates and (for `ready`) the
+   * Home page banner.
+   */
+  UPDATE_STATE_CHANGED: 'update_state_changed',
 } as const;
 export type PushChannel = (typeof PUSH)[keyof typeof PUSH];
 
@@ -87,6 +94,12 @@ export const REQUEST = {
   SESSION_RETRY_SUMMARY: 'session.retrySummary',
   SESSION_OPEN_SUMMARY: 'session.openSummary',
   REC_DICTATION_LIMIT_DISMISS: 'recording.dictationLimitDismiss',
+  /** Read the current update-state snapshot (for renderer initial mount). */
+  UPDATE_GET_STATE: 'update.getState',
+  /** Manual "Check for updates" trigger from Settings. */
+  UPDATE_CHECK_NOW: 'update.checkNow',
+  /** Restart-and-install. Refuses with `recording_active` if a session is live. */
+  UPDATE_QUIT_AND_INSTALL: 'update.quitAndInstall',
 } as const;
 export type RequestChannel = (typeof REQUEST)[keyof typeof REQUEST];
 
@@ -243,6 +256,50 @@ export interface MicDeviceLost {
  */
 export interface MicPermissionRequired {
   readonly mode: 'dictation' | 'meeting';
+}
+
+/**
+ * UpdateService state machine — what the renderer needs to render Settings →
+ * Updates and the Home banner.
+ *
+ *   idle        — no check has run yet this session, or no update found
+ *   checking    — `autoUpdater.checkForUpdates()` is in flight
+ *   available   — newer version exists; download started automatically
+ *   downloading — bytes are flowing; `progressPercent` is 0..100
+ *   ready       — download complete, SHA verified; user can "Restart & Update"
+ *   error       — last check or download failed; will retry on next cycle
+ *
+ * `version` is the remote version when available/downloading/ready, null
+ * otherwise. `error.code` is a coarse classification; `error.message` is
+ * for logs / Settings page (NEVER shown to end users verbatim).
+ *
+ * `disabled` is true for dev/unpackaged runs and unsupported platforms —
+ * Settings → Updates greys out the manual button and shows an explanatory
+ * line so it's obvious nothing will happen.
+ */
+export type UpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'error';
+
+export interface UpdateStateChanged {
+  readonly phase: UpdatePhase;
+  /** Semver of the remote release when one is on offer. Null otherwise. */
+  readonly version: string | null;
+  /** 0..100. Defined only while `phase === 'downloading'`. */
+  readonly progressPercent: number | null;
+  /** Coarse error category; populated only while `phase === 'error'`. */
+  readonly error: {
+    readonly code: 'network' | 'integrity' | 'signature' | 'unknown';
+    readonly message: string;
+  } | null;
+  /** App is unpackaged, wrong platform, or no publish URL — checks are noop. */
+  readonly disabled: boolean;
+  /** Currently running app version. Echoed for Settings header. */
+  readonly currentVersion: string;
 }
 
 /**
@@ -588,6 +645,7 @@ export interface PushPayloads {
   [PUSH.SUMMARY_STATE_CHANGED]: SummaryStateChanged;
   [PUSH.HUD_EDGE_ANCHOR]: HudEdgeAnchor;
   [PUSH.MIC_PERMISSION_REQUIRED]: MicPermissionRequired;
+  [PUSH.UPDATE_STATE_CHANGED]: UpdateStateChanged;
 }
 
 /** Request channels: channel name → { input, output } pair. */
@@ -673,4 +731,18 @@ export interface RequestPayloads {
   [REQUEST.SESSION_RETRY_SUMMARY]: { input: SessionRetrySummaryInput; output: Empty };
   [REQUEST.SESSION_OPEN_SUMMARY]: { input: SessionOpenSummaryInput; output: Empty };
   [REQUEST.REC_DICTATION_LIMIT_DISMISS]: { input: Empty; output: Empty };
+  [REQUEST.UPDATE_GET_STATE]: { input: Empty; output: UpdateStateChanged };
+  [REQUEST.UPDATE_CHECK_NOW]: { input: Empty; output: Empty };
+  /**
+   * Returns `{ ok: true }` on success (the app is about to quit) or
+   * `{ ok: false, error: 'recording_active' | 'not_ready' }` when the install
+   * can't proceed right now. Renderer copies its banner text from the error.
+   */
+  [REQUEST.UPDATE_QUIT_AND_INSTALL]: {
+    input: Empty;
+    output: {
+      readonly ok: boolean;
+      readonly error?: 'recording_active' | 'not_ready';
+    };
+  };
 }

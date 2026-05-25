@@ -88,9 +88,188 @@ export function SettingsPage() {
         </div>
       </Section>
 
+      <Section title="Updates">
+        <UpdatesCard />
+      </Section>
+
       <DangerZone />
     </div>
   );
+}
+
+/**
+ * UpdatesCard — current version + manual "Check for updates" + status line.
+ *
+ * Reads UpdateService state via IPC: a snapshot at mount, then live pushes on
+ * UPDATE_STATE_CHANGED. The button is greyed when the service is disabled
+ * (dev build, non-darwin) or while a check / download is in flight.
+ *
+ * Renderer treats `error` softly: the spec says check failures (404, network)
+ * are silent, so we don't pop a banner. Settings shows a muted "Last check
+ * failed — will retry" so support / power users can find it.
+ */
+function UpdatesCard() {
+  type State = Awaited<ReturnType<typeof window.electronAPI.update.getState>>;
+  const [state, setState] = useState<State | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Mirrors the Home banner: when the orchestrator is mid-capture the
+  // install button is disabled. We subscribe to RECORDING_STATE here even
+  // though the card only acts on the boolean — main also enforces the same
+  // gate, but the local copy is what keeps the button visually correct
+  // without a round-trip on every render.
+  const [recordingActive, setRecordingActive] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    window.electronAPI.update.getState().then((s) => {
+      if (alive) setState(s);
+    });
+    const offUpdate = window.electronAPI.on.updateStateChanged((s) => {
+      if (alive) setState(s);
+    });
+    const offRec = window.electronAPI.on.recordingStateChanged((e) => {
+      if (!alive) return;
+      setRecordingActive(
+        e.state === 'recording' || e.state === 'starting' || e.state === 'stopping',
+      );
+    });
+    return () => {
+      alive = false;
+      offUpdate();
+      offRec();
+    };
+  }, []);
+
+  const onCheck = async () => {
+    setBusy(true);
+    try {
+      await window.electronAPI.update.checkNow();
+    } finally {
+      // The state machine transitions through 'checking' → 'idle' / 'available'.
+      // We could listen for the next state-change and clear busy then, but
+      // the visual feedback is dominated by the status line which reads from
+      // `state.phase`. Clearing busy here keeps the button re-clickable if
+      // the user wants to retry.
+      setBusy(false);
+    }
+  };
+
+  const onInstall = async () => {
+    setBusy(true);
+    try {
+      const r = await window.electronAPI.update.quitAndInstall();
+      // If main refuses with recording_active (race against the renderer's
+      // local recording flag), flip the flag locally so the disabled-button
+      // copy shows up immediately. The recording-state listener will set it
+      // for real within a few ms anyway.
+      if (!r.ok && r.error === 'recording_active') {
+        setRecordingActive(true);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!state) {
+    return <p className="text-xs text-zinc-500">Loading…</p>;
+  }
+
+  const isReady = state.phase === 'ready';
+  const checkDisabled =
+    state.disabled || busy || state.phase === 'checking' || state.phase === 'downloading';
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-baseline justify-between">
+        <div>
+          <p className="text-sm text-zinc-200">TwinMind {state.currentVersion}</p>
+          <UpdateStatusLine state={state} recordingActive={recordingActive} />
+        </div>
+        {isReady ? (
+          <button
+            type="button"
+            onClick={() => void onInstall()}
+            disabled={busy || recordingActive}
+            className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+            title={
+              recordingActive ? 'Stop your recording, then click to install.' : undefined
+            }
+          >
+            {busy ? 'Restarting…' : 'Restart & Update'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void onCheck()}
+            disabled={checkDisabled}
+            className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-40"
+            title={state.disabled ? 'Updates are disabled in development builds' : undefined}
+          >
+            Check for updates
+          </button>
+        )}
+      </div>
+      {state.phase === 'downloading' && state.progressPercent !== null && (
+        <div className="h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+          <div
+            className="h-full bg-emerald-600 transition-all"
+            style={{ width: `${state.progressPercent}%` }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UpdateStatusLine({
+  state,
+  recordingActive,
+}: {
+  state: Awaited<ReturnType<typeof window.electronAPI.update.getState>>;
+  recordingActive: boolean;
+}) {
+  // Disabled wins over phase — when disabled, phase is always 'idle' anyway,
+  // but the explanatory line is the useful signal for the user.
+  if (state.disabled) {
+    return (
+      <p className="text-xs text-zinc-500">
+        Updates are disabled in this build (development or non-macOS).
+      </p>
+    );
+  }
+  switch (state.phase) {
+    case 'idle':
+      return <p className="text-xs text-zinc-400">You're on the latest version.</p>;
+    case 'checking':
+      return <p className="text-xs text-zinc-400">Checking for updates…</p>;
+    case 'available':
+      return (
+        <p className="text-xs text-zinc-400">
+          Update available: {state.version} — downloading…
+        </p>
+      );
+    case 'downloading':
+      return (
+        <p className="text-xs text-zinc-400">
+          Downloading {state.version}…
+          {state.progressPercent !== null ? ` ${state.progressPercent}%` : ''}
+        </p>
+      );
+    case 'ready':
+      return (
+        <p className="text-xs text-emerald-400">
+          {recordingActive
+            ? `${state.version} is ready — finish your recording first.`
+            : `${state.version} is ready to install.`}
+        </p>
+      );
+    case 'error':
+      return (
+        <p className="text-xs text-zinc-500">
+          Last check failed — will retry automatically.
+        </p>
+      );
+  }
 }
 
 /**

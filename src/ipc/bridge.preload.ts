@@ -131,6 +131,11 @@ const electronAPI = {
     getStatus: () => invoke(REQUEST.WIZARD_GET_STATUS, {}),
     complete: () => invoke(REQUEST.WIZARD_COMPLETE, {}),
   },
+  update: {
+    getState: () => invoke(REQUEST.UPDATE_GET_STATE, {}),
+    checkNow: () => invoke(REQUEST.UPDATE_CHECK_NOW, {}),
+    quitAndInstall: () => invoke(REQUEST.UPDATE_QUIT_AND_INSTALL, {}),
+  },
   on: {
     recordingStateChanged: (cb: (e: PushPayloads[typeof PUSH.RECORDING_STATE]) => void) =>
       subscribe(PUSH.RECORDING_STATE, cb),
@@ -168,6 +173,9 @@ const electronAPI = {
     micPermissionRequired: (
       cb: (e: PushPayloads[typeof PUSH.MIC_PERMISSION_REQUIRED]) => void,
     ) => subscribe(PUSH.MIC_PERMISSION_REQUIRED, cb),
+    updateStateChanged: (
+      cb: (e: PushPayloads[typeof PUSH.UPDATE_STATE_CHANGED]) => void,
+    ) => subscribe(PUSH.UPDATE_STATE_CHANGED, cb),
   },
 } as const;
 
