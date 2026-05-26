@@ -13,7 +13,7 @@
 
 import type { ReactNode } from 'react';
 import { cn } from './cn';
-import { Home, Mic, Radio, Settings as SettingsIcon } from 'lucide-react';
+import { ArrowUpRight, Home, Mic, Radio, Settings as SettingsIcon } from 'lucide-react';
 
 export type Tab = 'recording' | 'dictations' | 'meetings' | 'settings';
 
@@ -34,7 +34,20 @@ export function Layout({ tab, onTabChange, children }: LayoutProps) {
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-800 px-4 pt-3 pb-2">
-        <h1 className="text-sm font-semibold tracking-tight text-zinc-200">TwinMind</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-sm font-semibold tracking-tight text-zinc-200">TwinMind</h1>
+          <button
+            type="button"
+            onClick={() => {
+              void window.electronAPI.main.openWebApp().catch(() => {});
+            }}
+            className="flex items-center gap-1 rounded-md border border-zinc-800 px-2 py-1 text-[11px] font-medium text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
+            aria-label="Open TwinMind on the web"
+          >
+            View Web
+            <ArrowUpRight className="h-3 w-3" />
+          </button>
+        </div>
         <nav className="mt-3 flex gap-1">
           {TABS.map(({ id, label, icon: Icon }) => (
             <button

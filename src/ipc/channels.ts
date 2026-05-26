@@ -94,6 +94,14 @@ export const REQUEST = {
   SESSION_RETRY_FAILED: 'session.retryFailed',
   MAIN_SHOW_SESSIONS_TAB: 'main.showSessionsTab',
   MAIN_SHOW_HOME: 'main.showHome',
+  /**
+   * Opens the TwinMind web app in the user's default browser. URL is
+   * resolved in main from `twinmindBackendConfig.appUrl` (defaults to
+   * `https://app.twinmind.com`; overridable via `TWINMIND_APP_URL` env
+   * for dev/staging). Renderer can't supply a URL — keeps the open-
+   * external surface narrow.
+   */
+  MAIN_OPEN_WEB_APP: 'main.openWebApp',
   DIAGNOSTIC_MEETING_DETECTION_STATUS: 'diagnostic.meetingDetectionStatus',
   HOTKEY_CAPTURE_BEGIN: 'hotkey.captureBegin',
   HOTKEY_CAPTURE_END: 'hotkey.captureEnd',
@@ -748,6 +756,7 @@ export interface RequestPayloads {
   };
   [REQUEST.MAIN_SHOW_SESSIONS_TAB]: { input: Empty; output: Empty };
   [REQUEST.MAIN_SHOW_HOME]: { input: Empty; output: Empty };
+  [REQUEST.MAIN_OPEN_WEB_APP]: { input: Empty; output: Empty };
   [REQUEST.DIAGNOSTIC_MEETING_DETECTION_STATUS]: {
     input: Empty;
     output: MeetingDetectionStatusOutput;

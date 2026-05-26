@@ -441,6 +441,7 @@ export const RequestSchemas = {
   },
   [REQUEST.MAIN_SHOW_SESSIONS_TAB]: { input: empty, output: empty },
   [REQUEST.MAIN_SHOW_HOME]: { input: empty, output: empty },
+  [REQUEST.MAIN_OPEN_WEB_APP]: { input: empty, output: empty },
   [REQUEST.DIAGNOSTIC_MEETING_DETECTION_STATUS]: {
     input: empty,
     output: meetingDetectionStatusOutput,

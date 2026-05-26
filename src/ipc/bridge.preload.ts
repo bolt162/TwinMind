@@ -107,6 +107,7 @@ const electronAPI = {
   main: {
     showSessionsTab: () => invoke(REQUEST.MAIN_SHOW_SESSIONS_TAB, {}),
     showHome: () => invoke(REQUEST.MAIN_SHOW_HOME, {}),
+    openWebApp: () => invoke(REQUEST.MAIN_OPEN_WEB_APP, {}),
   },
   hotkey: {
     captureBegin: () => invoke(REQUEST.HOTKEY_CAPTURE_BEGIN, {}),

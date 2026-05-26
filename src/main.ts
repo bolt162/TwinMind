@@ -744,6 +744,17 @@ function wireIpc(b: IpcBridgeMain): void {
     openHome();
     return {};
   });
+  b.handle(REQUEST.MAIN_OPEN_WEB_APP, async () => {
+    // URL resolved server-side from the same config that drives the
+    // per-meeting "View Summary" deep link (main.ts:733). Renderer never
+    // sees a URL it could spoof. Defaults to `https://app.twinmind.com`;
+    // overridable via `TWINMIND_APP_URL` env var (e.g., staging builds).
+    const cfgRes = resolveTwinMindBackendConfig();
+    if (!cfgRes.ok) throw new Error('Backend not configured');
+    const { shell: electronShell } = await import('electron');
+    await electronShell.openExternal(cfgRes.config.appUrl);
+    return {};
+  });
   b.handle(REQUEST.HOTKEY_CAPTURE_BEGIN, (_input, ctx) => {
     const sender = ctx?.sender as WebContents | undefined;
     hotkeyCaptureWebContents = sender ?? null;

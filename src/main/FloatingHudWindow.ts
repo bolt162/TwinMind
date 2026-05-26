@@ -163,9 +163,22 @@ export class FloatingHudWindow {
       skipTransformProcessType: true,
     });
 
-    // `floating` keeps us above normal windows but below the screensaver
-    // and notifications, which is the right place for a control HUD.
-    this.win.setAlwaysOnTop(true, 'floating');
+    // `pop-up-menu` (NSPopUpMenuWindowLevel = 101) sits above the macOS
+    // Dock (NSDockWindowLevel = 20) so the HUD pill stays visible and
+    // clickable when:
+    //   - the user drags the pill into the dock's visible footprint, or
+    //   - dock auto-hide is on and the dock auto-reveals over our pill.
+    // Previously this was `floating` (level 3) — the dock drew on top
+    // of us and stole the clicks. Wispr Flow's HUD uses an equivalent
+    // level for the same reason.
+    //
+    // What we DON'T cover at this level: security prompts and the
+    // screensaver (both at level 1000+). What we DO cover that we
+    // didn't before: other apps' right-click pop-up menus, and macOS
+    // system notifications (level 25). In practice these don't visually
+    // collide with the pill's bottom-center footprint, but it's a real
+    // deviation from `floating` worth knowing.
+    this.win.setAlwaysOnTop(true, 'pop-up-menu');
 
     // Default to "click-through everywhere except where the renderer says
     // otherwise". The HUD window is sized for the widest pill state (failed

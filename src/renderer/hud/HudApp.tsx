@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Clock, ClipboardCheck, Mic, MicOff, Radio, RotateCw, History, X, Home } from 'lucide-react';
+import { Clock, ClipboardCheck, Mic, MicOff, RotateCw, History, X, Home } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 type RecordingState = 'idle' | 'starting' | 'recording' | 'stopping';
@@ -768,7 +768,7 @@ function MeetingButton({
       onMouseDown={onMouseDown}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
-      aria-label="Capture notes"
+      aria-label="Capture Notes"
       data-hud-interactive="true"
       className={[
         // h-8 (32 px) intentionally matches PILL_HEIGHT_EXPANDED on the
@@ -782,11 +782,34 @@ function MeetingButton({
           : 'pointer-events-none opacity-0 text-white/85',
       ].join(' ')}
     >
-      <Radio className="h-3.5 w-3.5 shrink-0" />
+      <CaptureNotesBars />
       <span className="text-[11px] font-medium tracking-wide">
-        Capture notes
+        Capture Notes
       </span>
     </button>
+  );
+}
+
+/**
+ * Three static vertical bars (short-tall-short) sized to the same 14×14
+ * footprint as the old `Radio` lucide icon, so swapping it doesn't shift
+ * the pill's content layout. Uses `currentColor` so the parent button's
+ * text color (white/85 → white on hover) drives the bar fill — matches
+ * how the previous lucide icon picked up text color.
+ */
+function CaptureNotesBars() {
+  // `items-center` (not `items-end`) so the middle bar protrudes past
+  // both the top AND bottom of the outer bars — reads as a centered
+  // equalizer icon `| | |` instead of a rising bar chart.
+  return (
+    <span
+      className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center gap-[1.5px]"
+      aria-hidden
+    >
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 7 }} />
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 13 }} />
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 7 }} />
+    </span>
   );
 }
 

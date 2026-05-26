@@ -76,6 +76,7 @@ declare global {
       readonly main: {
         showSessionsTab(): Promise<Record<string, never>>;
         showHome(): Promise<Record<string, never>>;
+        openWebApp(): Promise<Record<string, never>>;
       };
       readonly hotkey: {
         captureBegin(): Promise<Record<string, never>>;

@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Download, Radio, Sparkles } from 'lucide-react';
+import { Download, Sparkles } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 export function HomePage() {
@@ -61,9 +61,9 @@ export function HomePage() {
           <>
             Hover the floating microphone, then click the{' '}
             <InlineHudButton>
-              <Radio className="h-3 w-3 text-white" />
+              <InlineCaptureNotesBars />
               <span className="text-[10px] font-medium tracking-wide text-white">
-                Capture notes
+                Capture Notes
               </span>
             </InlineHudButton>{' '}
             button to start
@@ -188,8 +188,8 @@ function Kbd({ children }: { children: string }) {
 }
 
 /**
- * Mini visual of the HUD's "Capture notes" pill — matches the actual labelled
- * button (icon + "Capture notes" text) so the user can recognize it in the
+ * Mini visual of the HUD's "Capture Notes" pill — matches the actual labelled
+ * button (icon + "Capture Notes" text) so the user can recognize it in the
  * HUD when reading the meeting instructions. Smaller scale (h-5, body
  * font shrunk to 10 px) since it sits inline with body text.
  */
@@ -197,6 +197,27 @@ function InlineHudButton({ children }: { children: React.ReactNode }) {
   return (
     <span className="mx-0.5 inline-flex h-5 items-center justify-center gap-1 rounded-full border border-white/40 bg-black/55 px-1.5 align-middle">
       {children}
+    </span>
+  );
+}
+
+/**
+ * Inline mini version of the HUD's three-bar CaptureNotesBars icon —
+ * scaled down to sit inside InlineHudButton's 20 px row. Same short-tall-
+ * short proportions as the HUD copy.
+ */
+function InlineCaptureNotesBars() {
+  // Centered equalizer geometry — matches HudApp's CaptureNotesBars
+  // (`| | |` with the middle bar tallest above AND below) so the inline
+  // instruction visual mirrors the real HUD button exactly.
+  return (
+    <span
+      className="inline-flex h-3 w-3 shrink-0 items-center justify-center gap-[1px] text-white"
+      aria-hidden
+    >
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 6 }} />
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 11 }} />
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 6 }} />
     </span>
   );
 }

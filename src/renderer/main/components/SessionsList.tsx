@@ -111,18 +111,29 @@ function SessionRow({
   const showActionsRow = showSummary || showCopy;
 
   return (
+    // Whole row is the click target. Inner buttons (Retry, Trash, Copy,
+    // Summary) stop propagation so clicks on them don't open the detail
+    // view. Using role/tabIndex on the <li> (not nesting a <button> with
+    // children that are also buttons) keeps the AX tree valid.
     <li
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      aria-label={`Open ${session.title ?? `untitled ${session.mode}`}`}
       className={cn(
-        'group flex flex-col gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 transition-colors',
+        'group flex cursor-pointer flex-col gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 transition-colors',
         'hover:border-zinc-700 hover:bg-zinc-900',
+        'focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-500',
       )}
     >
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={onOpen}
-          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-        >
+        <div className="flex min-w-0 flex-1 items-center gap-3 text-left">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
             <Icon className="h-4 w-4" />
           </div>
@@ -147,7 +158,7 @@ function SessionRow({
               </div>
             )}
           </div>
-        </button>
+        </div>
         {hasFailures && (
           <button
             type="button"
@@ -178,6 +189,11 @@ function SessionRow({
         </button>
       </div>
       {showActionsRow && (
+        // No wrapper-level stopPropagation here — Copy + Summary buttons
+        // each call stopPropagation in their own onClick handlers. The
+        // empty timestamp area inside this row IS meant to bubble up to
+        // the row's onClick so the user can click anywhere outside the
+        // action buttons to open the detail view.
         <div className="flex items-center gap-2 pl-11">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {showCopy && (
