@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { Mic, Radio, Accessibility as AccessibilityIcon } from 'lucide-react';
 import { useSettings } from '../hooks/useSettings';
 import { cn } from './cn';
 import { HotkeyCaptureField } from './HotkeyCaptureField';
@@ -48,6 +49,10 @@ export function SettingsPage() {
     <div className="space-y-6">
       <Section title="Account">
         <AccountCard />
+      </Section>
+
+      <Section title="Permissions">
+        <PermissionsCard />
       </Section>
 
       <Section title="Meeting auto-detection">
@@ -518,6 +523,374 @@ function InputDeviceField({
       </span>
     </label>
   );
+}
+
+// ─── Permissions section ───────────────────────────────────────────────────
+//
+// Lets the user re-grant any macOS TCC permission they previously denied or
+// skipped during onboarding. macOS does not let us programmatically revoke
+// or toggle a grant — the user always has to flip the switch in System
+// Settings — but we CAN:
+//   - Fire the OS request dialog when the state is `not_determined` (mic /
+//     accessibility) or probe via audiotee (system audio).
+//   - Deep-link to the matching Privacy & Security pane on `denied` so the
+//     user has a one-click path to the toggle that matters.
+//
+// Notifications are intentionally excluded: macOS gives us no introspection
+// AND no deep-link target, so a row would be a half-broken UX.
+//
+// Per-permission caveats:
+//   - Mic: real introspection via `permissions.read({kind:'mic'})`. 2s poll
+//     while the page is mounted catches outside-the-app changes.
+//   - Accessibility: API conflates `denied` and `not_determined` into "not
+//     trusted". The global AccessibilityWatcher already polls; we subscribe
+//     to its `PUSH.ACCESSIBILITY_LOST` push for live updates here.
+//   - System audio: ZERO introspection. We persist a localStorage hint
+//     after a successful probe; the user can re-probe via the "Re-check"
+//     button. The hint goes stale after an out-of-app revoke — the only
+//     way to verify is to re-run audiotee, hence the explicit button.
+
+type GrantState = 'granted' | 'denied' | 'not_determined' | 'unavailable';
+
+const AUDIO_CAP_HINT_KEY = 'twinmind.permissions.audioCaptureGranted';
+
+function PermissionsCard() {
+  return (
+    <div className="space-y-3">
+      <MicrophoneRow />
+      <SystemAudioRow />
+      <AccessibilityRow />
+    </div>
+  );
+}
+
+/**
+ * Generic row container: icon column, title + description text column,
+ * status pill, action button column. Used by all three rows so the
+ * visual rhythm matches even though the action logic per row differs.
+ */
+function PermissionRow({
+  icon,
+  title,
+  description,
+  pill,
+  actions,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  pill: React.ReactNode;
+  actions: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300">
+        {icon}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-zinc-100">{title}</span>
+          {pill}
+        </div>
+        <p className="mt-0.5 text-xs text-zinc-500">{description}</p>
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1.5">{actions}</div>
+    </div>
+  );
+}
+
+function StatusPill({ tone, label }: { tone: 'granted' | 'denied' | 'unknown'; label: string }) {
+  const classes =
+    tone === 'granted'
+      ? 'border-emerald-700/60 bg-emerald-900/30 text-emerald-300'
+      : tone === 'denied'
+        ? 'border-red-800/70 bg-red-900/30 text-red-300'
+        : 'border-zinc-700 bg-zinc-800/60 text-zinc-300';
+  return (
+    <span
+      className={cn(
+        'shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium leading-none uppercase tracking-wide',
+        classes,
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function PrimaryActionButton({
+  onClick,
+  busy,
+  children,
+}: {
+  onClick: () => void;
+  busy?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className="rounded-md border border-amber-700/70 bg-amber-900/40 px-3 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-40"
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Microphone row — full introspection. 2s poll on the live grant state.
+ * Action branches `not_determined` → request, `denied`/`unavailable` →
+ * open settings. Same logic that lives in the HUD's mic-permission banner
+ * and in onboarding's MicStep — kept consistent so users see the same
+ * vocabulary everywhere ("Allow" for a new prompt, "Open settings" for
+ * a fix-it-yourself flow).
+ */
+function MicrophoneRow() {
+  const [grant, setGrant] = useState<GrantState>('not_determined');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await window.electronAPI.permissions.read({ kind: 'mic' });
+        if (!cancelled) setGrant(r.grant as GrantState);
+      } catch {
+        /* ignore transient IPC errors */
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const onAction = async () => {
+    setBusy(true);
+    try {
+      if (grant === 'not_determined') {
+        const r = await window.electronAPI.permissions.requestMic();
+        setGrant(r.granted ? 'granted' : 'denied');
+      } else if (grant !== 'granted') {
+        await window.electronAPI.permissions.openSystemSettings({ kind: 'mic' });
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pill =
+    grant === 'granted' ? (
+      <StatusPill tone="granted" label="Allowed" />
+    ) : grant === 'not_determined' ? (
+      <StatusPill tone="unknown" label="Not asked yet" />
+    ) : (
+      <StatusPill tone="denied" label="Denied" />
+    );
+
+  const actions =
+    grant === 'granted' ? null : (
+      <PrimaryActionButton onClick={() => void onAction()} busy={busy}>
+        {grant === 'not_determined'
+          ? busy
+            ? 'Requesting…'
+            : 'Allow'
+          : busy
+            ? 'Opening…'
+            : 'Open settings'}
+      </PrimaryActionButton>
+    );
+
+  return (
+    <PermissionRow
+      icon={<Mic className="h-4 w-4" />}
+      title="Microphone"
+      description="Required to record your voice."
+      pill={pill}
+      actions={actions}
+    />
+  );
+}
+
+/**
+ * System audio row — no introspection API exists on macOS. We persist a
+ * "previously granted" hint in localStorage after a successful audiotee
+ * probe; the `requestAudioCapture` IPC re-runs that probe (which surfaces
+ * the OS prompt the first time and silently returns false thereafter if
+ * the user has denied). The hint is per-machine and can go stale after an
+ * out-of-app revoke, so we always offer a "Re-check" affordance.
+ *
+ * Three derived states:
+ *   - `hint=granted` and no recent failure → show "Allowed" + Re-check.
+ *   - `hint=null` → show "Not asked yet" + Allow.
+ *   - last probe failed → show "Probe failed" + Open settings + Re-check.
+ */
+function SystemAudioRow() {
+  type Local = 'unknown' | 'granted' | 'failed';
+  const [state, setState] = useState<Local>(() =>
+    readBoolHint(AUDIO_CAP_HINT_KEY) ? 'granted' : 'unknown',
+  );
+  const [busy, setBusy] = useState(false);
+
+  const probe = async () => {
+    setBusy(true);
+    try {
+      const r = await window.electronAPI.permissions.requestAudioCapture();
+      if (r.granted) {
+        writeBoolHint(AUDIO_CAP_HINT_KEY, true);
+        setState('granted');
+      } else {
+        writeBoolHint(AUDIO_CAP_HINT_KEY, false);
+        setState('failed');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openSettings = () => {
+    void window.electronAPI.permissions
+      .openSystemSettings({ kind: 'audioCapture' })
+      .catch(() => {});
+  };
+
+  const pill =
+    state === 'granted' ? (
+      <StatusPill tone="granted" label="Allowed" />
+    ) : state === 'failed' ? (
+      <StatusPill tone="denied" label="Probe failed" />
+    ) : (
+      <StatusPill tone="unknown" label="Not asked yet" />
+    );
+
+  const actions =
+    state === 'granted' ? (
+      <button
+        type="button"
+        onClick={() => void probe()}
+        disabled={busy}
+        className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-40"
+      >
+        {busy ? 'Checking…' : 'Re-check'}
+      </button>
+    ) : state === 'failed' ? (
+      <>
+        <PrimaryActionButton onClick={openSettings} busy={busy}>
+          Open settings
+        </PrimaryActionButton>
+        <button
+          type="button"
+          onClick={() => void probe()}
+          disabled={busy}
+          className="text-[11px] text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+        >
+          {busy ? 'Checking…' : 'Re-check'}
+        </button>
+      </>
+    ) : (
+      <PrimaryActionButton onClick={() => void probe()} busy={busy}>
+        {busy ? 'Checking…' : 'Allow'}
+      </PrimaryActionButton>
+    );
+
+  return (
+    <PermissionRow
+      icon={<Radio className="h-4 w-4" />}
+      title="System audio capture"
+      description="Lets meeting mode hear the other side of a Zoom or Meet call."
+      pill={pill}
+      actions={actions}
+    />
+  );
+}
+
+/**
+ * Accessibility row — the macOS API conflates `denied` and `not_determined`
+ * (`isTrustedAccessibilityClient(false)` returns true/false only). So the
+ * "Not granted" pill covers both. The primary action calls
+ * `requestAccessibility`, which on macOS surfaces the system prompt AND
+ * opens the Privacy → Accessibility pane in one call — works regardless of
+ * the underlying state.
+ *
+ * Live updates come from the global AccessibilityWatcher push (no extra
+ * polling here; the watcher already polls every 1.5s and broadcasts
+ * transitions via PUSH.ACCESSIBILITY_LOST).
+ */
+function AccessibilityRow() {
+  const [granted, setGranted] = useState<boolean>(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void window.electronAPI.permissions
+      .read({ kind: 'accessibility' })
+      .then((r) => {
+        if (alive) setGranted(r.grant === 'granted');
+      })
+      .catch(() => {});
+    const off = window.electronAPI.on.accessibilityLost((e) => {
+      if (alive) setGranted(e.granted);
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, []);
+
+  const onGrant = async () => {
+    setBusy(true);
+    try {
+      // requestAccessibility(true) → surfaces the prompt AND opens the
+      // Privacy → Accessibility pane in one shot. The user flips the
+      // toggle and the watcher push above flips us to granted.
+      await window.electronAPI.permissions.requestAccessibility();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pill = granted ? (
+    <StatusPill tone="granted" label="Allowed" />
+  ) : (
+    <StatusPill tone="denied" label="Not granted" />
+  );
+
+  const actions = granted ? null : (
+    <PrimaryActionButton onClick={() => void onGrant()} busy={busy}>
+      {busy ? 'Opening…' : 'Grant'}
+    </PrimaryActionButton>
+  );
+
+  return (
+    <PermissionRow
+      icon={<AccessibilityIcon className="h-4 w-4" />}
+      title="Accessibility"
+      description="Required for Fn dictation, custom hotkeys, and auto-paste."
+      pill={pill}
+      actions={actions}
+    />
+  );
+}
+
+function readBoolHint(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeBoolHint(key: string, value: boolean): void {
+  try {
+    if (value) localStorage.setItem(key, 'true');
+    else localStorage.removeItem(key);
+  } catch {
+    /* private mode or quota — ignore */
+  }
 }
 
 /**

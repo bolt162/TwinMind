@@ -56,6 +56,15 @@ export interface IGlobeKeyLike {
   stop(): void;
   on(event: 'press', cb: () => void): () => void;
   on(event: 'release', cb: () => void): () => void;
+  /**
+   * Fires when the native event-tap callback has determined the CGEventTap
+   * is dead and torn it down. Two causes today:
+   *   - macOS revoked Accessibility (kCGEventTapDisabledByUserInput).
+   *   - Timeout-re-enable storm or trust missing on re-enable.
+   * The manager should mark the tap uninstalled and poll trust before
+   * calling start() again.
+   */
+  on(event: 'tap_lost', cb: () => void): () => void;
 }
 
 export declare function micCapture(): ICaptureLike;

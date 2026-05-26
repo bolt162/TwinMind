@@ -173,6 +173,12 @@ const electronAPI = {
     micPermissionRequired: (
       cb: (e: PushPayloads[typeof PUSH.MIC_PERMISSION_REQUIRED]) => void,
     ) => subscribe(PUSH.MIC_PERMISSION_REQUIRED, cb),
+    accessibilityLost: (
+      cb: (e: PushPayloads[typeof PUSH.ACCESSIBILITY_LOST]) => void,
+    ) => subscribe(PUSH.ACCESSIBILITY_LOST, cb),
+    hudClipboardToast: (
+      cb: (e: PushPayloads[typeof PUSH.HUD_CLIPBOARD_TOAST]) => void,
+    ) => subscribe(PUSH.HUD_CLIPBOARD_TOAST, cb),
     updateStateChanged: (
       cb: (e: PushPayloads[typeof PUSH.UPDATE_STATE_CHANGED]) => void,
     ) => subscribe(PUSH.UPDATE_STATE_CHANGED, cb),

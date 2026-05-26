@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Clock, Mic, MicOff, Radio, RotateCw, History, X, Home } from 'lucide-react';
+import { Clock, ClipboardCheck, Mic, MicOff, Radio, RotateCw, History, X, Home } from 'lucide-react';
 import { formatHotkey, type Hotkey } from '@core/hotkey/HotkeyTypes';
 
 type RecordingState = 'idle' | 'starting' | 'recording' | 'stopping';
@@ -74,11 +74,39 @@ export function HudApp() {
   const [deviceLost, setDeviceLost] = useState<DeviceLostState | null>(null);
   /**
    * Set when main pushes MIC_PERMISSION_REQUIRED — i.e. the user tried to
-   * start a recording but the macOS mic permission isn't `granted`
-   * (denied, not_determined, or unavailable). HUD shows the "Please grant
-   * Microphone permission" banner; cleared by the Dismiss button.
+   * start a recording but the macOS mic permission isn't `granted`. HUD
+   * shows the "Please grant Microphone permission" banner; cleared by the
+   * Dismiss button.
+   *
+   * We carry the OS grant alongside `mode` because the banner's primary
+   * action branches on it: `not_determined` fires the OS request dialog
+   * (macOS won't show TwinMind in the Privacy panel until askForMediaAccess
+   * has been called at least once); `denied`/`unavailable` opens Privacy →
+   * Microphone where the toggle lives.
    */
-  const [micPermissionRequired, setMicPermissionRequired] = useState(false);
+  const [micPermissionRequired, setMicPermissionRequired] = useState<{
+    mode: 'dictation' | 'meeting';
+    grant: 'denied' | 'not_determined' | 'unavailable';
+  } | null>(null);
+  /**
+   * Set when main pushes ACCESSIBILITY_LOST with `granted: false` — the user
+   * revoked TwinMind's Accessibility grant mid-session. Fn dictation +
+   * configurable hotkeys + auto-paste are all dead until the user re-grants.
+   * Cleared automatically when main pushes `granted: true` again (no
+   * Dismiss button — the only useful action is to re-grant).
+   */
+  const [accessibilityRequired, setAccessibilityRequired] = useState(false);
+  /**
+   * Set when main pushes HUD_CLIPBOARD_TOAST — dictation text was written
+   * to the clipboard but couldn't auto-paste (Accessibility denied or
+   * native paste failed). Pill briefly becomes a "Copied to clipboard ✓"
+   * toast that fades out over 2 s, then reverts to idle.
+   *
+   * Auto-dismiss handled in the subscriber via setTimeout. Restartable —
+   * a second paste while the toast is up resets the 2 s window.
+   */
+  const [copiedToastVisible, setCopiedToastVisible] = useState(false);
+  const copiedToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
    * Edge anchor pushed by main when the pill is near a workArea edge.
    * Used to flip the hover-group expansion direction so Capture notes + Home
@@ -224,8 +252,21 @@ export function HudApp() {
     const unsubAnchor = window.electronAPI.on.hudEdgeAnchor((e) => {
       setEdgeAnchor(e);
     });
-    const unsubMicPerm = window.electronAPI.on.micPermissionRequired(() => {
-      setMicPermissionRequired(true);
+    const unsubMicPerm = window.electronAPI.on.micPermissionRequired((e) => {
+      setMicPermissionRequired({ mode: e.mode, grant: e.grant });
+    });
+    const unsubAxLost = window.electronAPI.on.accessibilityLost((e) => {
+      setAccessibilityRequired(!e.granted);
+    });
+    const unsubClipboardToast = window.electronAPI.on.hudClipboardToast(() => {
+      setCopiedToastVisible(true);
+      // Restart the 2 s window if a second paste fires while the toast is
+      // still up. Ref-stored so successive pushes don't pile up timers.
+      if (copiedToastTimerRef.current) clearTimeout(copiedToastTimerRef.current);
+      copiedToastTimerRef.current = setTimeout(() => {
+        setCopiedToastVisible(false);
+        copiedToastTimerRef.current = null;
+      }, 2000);
     });
     return () => {
       unsubRec();
@@ -235,6 +276,12 @@ export function HudApp() {
       unsubAuth();
       unsubAnchor();
       unsubMicPerm();
+      unsubAxLost();
+      unsubClipboardToast();
+      if (copiedToastTimerRef.current) {
+        clearTimeout(copiedToastTimerRef.current);
+        copiedToastTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -308,34 +355,46 @@ export function HudApp() {
     | 'processing'
     | 'failed'
     | 'micPermission'
+    | 'accessibilityRequired'
     | 'dictationLimit'
     | 'disconnected'
+    | 'copiedToast'
     | 'hoverIdle'
     | 'busy'
     | 'idle';
-  // micPermission is highest priority — start was blocked before the
-  // orchestrator ran, so there's no recording / processing competing for
-  // the slot, and the banner needs to be unmissable so the user fixes
-  // permissions. dictationLimit + disconnected come next — banners the
-  // user has to acknowledge. dictationLimit wins over recording because
-  // the orchestrator already stopped the session when it fired the limit.
-  const visual: Visual = micPermissionRequired
-    ? 'micPermission'
-    : txState.kind === 'dictation_limit_reached'
-      ? 'dictationLimit'
-      : deviceLost && !isRecording
-        ? 'disconnected'
-        : isRecording
-          ? 'recording'
-          : isBusy
-            ? 'busy'
-            : txState.kind === 'processing'
-              ? 'processing'
-              : txState.kind === 'failed'
-                ? 'failed'
-                : hovered
-                  ? 'hoverIdle'
-                  : 'idle';
+  // accessibilityRequired is the highest priority — revoking Accessibility
+  // disables Fn dictation + configurable hotkeys + auto-paste at once, and
+  // (per the system-freeze bug we just patched) is the single most dangerous
+  // permission to lose. micPermission is next — start was blocked before the
+  // orchestrator ran, so there's no recording / processing competing for the
+  // slot. dictationLimit + disconnected come after — banners the user has to
+  // acknowledge. dictationLimit wins over recording because the orchestrator
+  // already stopped the session when it fired the limit.
+  // copiedToast sits BELOW recording / banners / processing so a new
+  // dictation that fires within the 2 s toast window immediately reclaims
+  // the pill, and ABOVE hoverIdle so hovering during the toast doesn't
+  // hide the "Copied to clipboard ✓" message.
+  const visual: Visual = accessibilityRequired
+    ? 'accessibilityRequired'
+    : micPermissionRequired
+      ? 'micPermission'
+      : txState.kind === 'dictation_limit_reached'
+        ? 'dictationLimit'
+        : deviceLost && !isRecording
+          ? 'disconnected'
+          : isRecording
+            ? 'recording'
+            : isBusy
+              ? 'busy'
+              : txState.kind === 'processing'
+                ? 'processing'
+                : txState.kind === 'failed'
+                  ? 'failed'
+                  : copiedToastVisible
+                    ? 'copiedToast'
+                    : hovered
+                      ? 'hoverIdle'
+                      : 'idle';
   const expanded = visual !== 'idle';
   // Every wide-banner state (the user is being asked to act on a specific
   // problem). Home + Capture notes are pulled out of the layout while a banner
@@ -345,7 +404,22 @@ export function HudApp() {
     visual === 'failed' ||
     visual === 'dictationLimit' ||
     visual === 'disconnected' ||
-    visual === 'micPermission';
+    visual === 'micPermission' ||
+    visual === 'accessibilityRequired';
+  // Capture notes + Home pop out on hover only when the pill is in a
+  // user-driven idle/hoverIdle state. We explicitly suppress them while
+  // the pill is showing a transient or working state — processing
+  // (chunks uploading after a dictation stop), busy (starting/stopping),
+  // copiedToast (post-paste fade). Otherwise hovering the still-visible
+  // pill during these moments would surface buttons the user can't
+  // meaningfully act on (Capture notes is start-only and blocked by
+  // `isBlockingNewRecording`; Home is fine but inconsistent UX).
+  const hoverButtonsVisible =
+    hovered &&
+    !bannerVisible &&
+    visual !== 'processing' &&
+    visual !== 'busy' &&
+    visual !== 'copiedToast';
 
   // Notify main of the current visual state. Main uses this to decide
   // whether to shift the HUD window so larger states (banner: 400 × 100)
@@ -416,6 +490,7 @@ export function HudApp() {
     // pill body itself would otherwise re-fire startDictation → re-push
     // the banner. Idempotent but pointless; just no-op.
     if (micPermissionRequired) return;
+    if (accessibilityRequired) return;
     if (recording === 'idle' && txState.kind === 'idle') {
       void window.electronAPI.recording.startDictation().catch(() => {});
     } else if (isRecording && mode === 'dictation') {
@@ -433,13 +508,17 @@ export function HudApp() {
   return (
     <div className="flex h-full w-full items-center justify-center">
       {/*
-        Inner wrapper that ALSO triggers hovered. Its bounding box covers
-        the three buttons PLUS the 8 px gaps between them, so the cursor
-        traversing a gap (or moving slightly above/below the buttons but
-        still within their row) keeps the group hovered. Without this,
-        the per-button handlers alone left dead-zones in the gaps that
-        the 350 ms grace timer could expire across. data-hud-interactive
-        is what `recheckIgnore` uses to keep the window click-receiving.
+        Layout wrapper only — NO hover handlers and NO data-hud-interactive
+        attribute. Hover is per-button: the Dictate pill is the only entry
+        point that flips `hovered` to true; Home + Capture notes have their
+        own onMouseEnter to KEEP it true while the cursor traverses to
+        them. The 350 ms grace timer in `setGroupHovered(false)` covers
+        the brief 8 px gap traversal between visible buttons.
+        Side effect: the 8 px gaps between buttons are now click-through,
+        which is correct — they're not interactive surfaces.
+        Previously this wrapper had a full-row hover hit-box that fired
+        even when the cursor was over empty space where Capture notes
+        WOULD appear if hovered — surfacing the buttons unintentionally.
       */}
       <div
         className={[
@@ -455,12 +534,9 @@ export function HudApp() {
         ]
           .filter(Boolean)
           .join(' ')}
-        data-hud-interactive="true"
-        onMouseEnter={() => setGroupHovered(true)}
-        onMouseLeave={() => setGroupHovered(false)}
       >
       <HomeButton
-        visible={hovered && !bannerVisible}
+        visible={hoverButtonsVisible}
         onEnter={() => setGroupHovered(true)}
         onLeave={() => setGroupHovered(false)}
       />
@@ -484,7 +560,9 @@ export function HudApp() {
                     ? 'Dictation limit reached; dismiss or start a new dictation'
                     : visual === 'micPermission'
                       ? 'Microphone permission required; open settings or dismiss'
-                      : 'Start dictation'
+                      : visual === 'accessibilityRequired'
+                        ? 'Accessibility permission required; open settings to restore Fn dictation'
+                        : 'Start dictation'
         }
         className={[
           // justify-center keeps single-child states (idle EQ glyph,
@@ -500,7 +578,8 @@ export function HudApp() {
           visual === 'failed' ||
           visual === 'disconnected' ||
           visual === 'dictationLimit' ||
-          visual === 'micPermission'
+          visual === 'micPermission' ||
+          visual === 'accessibilityRequired'
             ? 'px-6 py-4 items-stretch'
             : visual === 'recording'
               ? 'px-3'
@@ -548,6 +627,22 @@ export function HudApp() {
             <span className="text-[11px] font-medium text-white/85">…</span>
           </>
         )}
+        {visual === 'copiedToast' && (
+          // Content fades to 0 over 2 s — the pill itself stays mounted
+          // until the parent state flips back to idle (also at 2 s), so
+          // the fade and the visual transition land together. CSS-only
+          // animation avoids per-frame React renders.
+          <span
+            className="flex items-center gap-1.5"
+            style={{ animation: 'hud-copied-toast-fade 2s ease-out forwards' }}
+          >
+            <style>{COPIED_TOAST_KEYFRAMES}</style>
+            <ClipboardCheck className="h-3.5 w-3.5 text-emerald-300" aria-hidden />
+            <span className="text-[11px] font-medium tracking-wide text-white/90">
+              Copied to clipboard
+            </span>
+          </span>
+        )}
         {visual === 'recording' && (
           <>
             <span
@@ -577,8 +672,19 @@ export function HudApp() {
             onResolved={() => setDeviceLost(null)}
           />
         )}
-        {visual === 'micPermission' && (
-          <MicPermissionBanner onDismiss={() => setMicPermissionRequired(false)} />
+        {visual === 'micPermission' && micPermissionRequired && (
+          <MicPermissionBanner
+            grant={micPermissionRequired.grant}
+            onDismiss={() => setMicPermissionRequired(null)}
+            onGrantTransition={(next) =>
+              setMicPermissionRequired((prev) =>
+                prev ? { ...prev, grant: next } : prev,
+              )
+            }
+          />
+        )}
+        {visual === 'accessibilityRequired' && (
+          <AccessibilityBanner onDismiss={() => setAccessibilityRequired(false)} />
         )}
       </button>
       {/*
@@ -590,7 +696,7 @@ export function HudApp() {
       */}
       {recording === 'idle' && (
       <MeetingButton
-        visible={hovered && !bannerVisible}
+        visible={hoverButtonsVisible}
         // Drag plumbing — share the parent's drag refs so Capture notes is a
         // valid grab-handle for moving the HUD, same as the Dictate pill.
         // getDragMoved/clearDragMoved let handleClick suppress its own
@@ -734,8 +840,10 @@ type PillVisual =
   | 'processing'
   | 'failed'
   | 'micPermission'
+  | 'accessibilityRequired'
   | 'dictationLimit'
   | 'disconnected'
+  | 'copiedToast'
   | 'hoverIdle'
   | 'busy'
   | 'idle';
@@ -765,6 +873,13 @@ function pillWidth(v: PillVisual): number {
       return 400;
     case 'micPermission':
       return 400;
+    case 'accessibilityRequired':
+      return 400;
+    case 'copiedToast':
+      // Wide enough for icon + "Copied to clipboard" at 11px font; matches
+      // FloatingHudWindow.VISUAL_BOUNDS.copiedToast.width so the bg pill
+      // and the OS window grow together.
+      return 180;
   }
 }
 
@@ -786,7 +901,8 @@ function pillHeight(v: PillVisual): number {
     v === 'failed' ||
     v === 'disconnected' ||
     v === 'dictationLimit' ||
-    v === 'micPermission'
+    v === 'micPermission' ||
+    v === 'accessibilityRequired'
   ) {
     return PILL_HEIGHT_FAILED;
   }
@@ -866,6 +982,21 @@ const LOADER_KEYFRAMES = `
 const HOVER_CONTENT_KEYFRAMES = `
   @keyframes hud-hover-content-in {
     to { opacity: 1; }
+  }
+`;
+
+/**
+ * 2-second fade-out for the "Copied to clipboard ✓" pill. The pill stays
+ * fully visible for the first half second, then ramps to 0 opacity over
+ * the next 1.5 seconds — a long-tail fade reads as "this is finished"
+ * better than a sharp cut. Parent flips the visual back to 'idle' at
+ * the same 2 s mark so the pill unmounts as the fade completes.
+ */
+const COPIED_TOAST_KEYFRAMES = `
+  @keyframes hud-copied-toast-fade {
+    0%   { opacity: 1; }
+    25%  { opacity: 1; }
+    100% { opacity: 0; }
   }
 `;
 
@@ -1012,30 +1143,83 @@ function DictationLimitBanner() {
 
 /**
  * Mic permission banner: shown when a recording-start attempt was
- * rejected because the macOS mic permission isn't `granted`. Mirrors
- * FailedBanner's two-column layout exactly. Buttons:
+ * rejected because the macOS mic permission isn't `granted`. The primary
+ * action branches on the current TCC grant — see the MicPermissionRequired
+ * payload doc in channels.ts for the reasoning.
  *
- *   Open settings — opens System Settings → Privacy → Microphone via
- *                   the existing PERMISSIONS_OPEN_SYSTEM_SETTINGS IPC.
- *   Dismiss       — clears the local banner state; HUD returns to idle.
- *                   No main-side cleanup needed (the orchestrator was
- *                   never started).
+ *   grant=not_determined → "Allow" → fires the OS request dialog via
+ *                          PERMISSIONS_REQUEST_MIC. macOS hasn't yet
+ *                          registered TwinMind in Privacy → Microphone,
+ *                          so deep-linking there from this state would
+ *                          land on an empty list — useless. We MUST
+ *                          trigger the dialog from this state.
+ *                          If the user denies in the dialog, we flip
+ *                          the local grant to 'denied' via
+ *                          onGrantTransition so the same banner
+ *                          re-renders with the open-settings path.
+ *   grant=denied/unavailable → "Open settings" → deep-links to Privacy →
+ *                          Microphone, where TwinMind IS registered with
+ *                          the toggle off and the user can flip it on.
+ *
+ *   Dismiss in both branches clears the local banner state; HUD returns
+ *   to idle. The orchestrator was never started, so no main-side cleanup.
  */
-function MicPermissionBanner({ onDismiss }: { onDismiss: () => void }) {
+function MicPermissionBanner({
+  grant,
+  onDismiss,
+  onGrantTransition,
+}: {
+  grant: 'denied' | 'not_determined' | 'unavailable';
+  onDismiss: () => void;
+  /**
+   * Called when the in-banner OS dialog finishes with a deny — the banner
+   * needs to flip from the "Allow" branch to the "Open settings" branch
+   * without going back through main. Parent updates its state; the
+   * banner re-renders with the new grant on the next React tick.
+   */
+  onGrantTransition: (next: 'denied' | 'not_determined' | 'unavailable') => void;
+}) {
   const [busy, setBusy] = useState(false);
-  const onOpenSettings: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+  const isNotDetermined = grant === 'not_determined';
+  const onPrimary: React.MouseEventHandler<HTMLButtonElement> = (e) => {
     e.stopPropagation();
     if (busy) return;
     setBusy(true);
-    void window.electronAPI.permissions
-      .openSystemSettings({ kind: 'mic' })
-      .catch(() => {})
-      .finally(() => setBusy(false));
+    if (isNotDetermined) {
+      void window.electronAPI.permissions
+        .requestMic()
+        .then((r) => {
+          if (r.granted) {
+            // Granted via dialog — clear the banner. Orchestrator wasn't
+            // started, so the user clicks the pill again to record.
+            onDismiss();
+          } else {
+            // Denied in the dialog — banner stays up but flips to the
+            // open-settings path since further requestMic() calls will
+            // no-op (macOS doesn't re-prompt after a deny).
+            onGrantTransition('denied');
+          }
+        })
+        .catch(() => {})
+        .finally(() => setBusy(false));
+    } else {
+      void window.electronAPI.permissions
+        .openSystemSettings({ kind: 'mic' })
+        .catch(() => {})
+        .finally(() => setBusy(false));
+    }
   };
   const onDismissClick: React.MouseEventHandler<HTMLButtonElement> = (e) => {
     e.stopPropagation();
     onDismiss();
   };
+  const primaryLabel = isNotDetermined
+    ? busy
+      ? 'Requesting…'
+      : 'Allow'
+    : busy
+      ? 'Opening…'
+      : 'Open settings';
   return (
     <span className="flex h-full w-full items-center justify-center gap-2">
       {/* Single-line headline — the other banners have a sub-line and use
@@ -1050,11 +1234,68 @@ function MicPermissionBanner({ onDismiss }: { onDismiss: () => void }) {
       <span className="flex shrink-0 flex-col justify-center gap-1.5">
         <button
           type="button"
+          onClick={onPrimary}
+          disabled={busy}
+          className="flex w-28 items-center justify-center gap-1 rounded-md border border-amber-700/70 bg-amber-900/40 px-2 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-60"
+        >
+          {primaryLabel}
+        </button>
+        <button
+          type="button"
+          onClick={onDismissClick}
+          className="flex w-28 items-center justify-center gap-1 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[12px] font-medium text-white/85 hover:bg-white/10"
+        >
+          Dismiss
+        </button>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Accessibility-required banner: shown when main pushes ACCESSIBILITY_LOST
+ * with `granted: false` — the user revoked TwinMind's Accessibility grant
+ * mid-session. Two buttons:
+ *
+ *   Settings — deep-links to System Settings → Privacy → Accessibility.
+ *   Dismiss  — clears the local banner state; HUD returns to idle.
+ *              Re-appears on the next revoke transition; auto-clears when
+ *              main pushes `granted: true`.
+ *
+ * Single-line headline (no body copy) so the layout matches the mic-
+ * permission banner.
+ */
+function AccessibilityBanner({ onDismiss }: { onDismiss: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const onOpenSettings: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    void window.electronAPI.permissions
+      .openSystemSettings({ kind: 'accessibility' })
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+  const onDismissClick: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.stopPropagation();
+    onDismiss();
+  };
+  return (
+    <span className="flex h-full w-full items-center justify-center gap-2">
+      <span className="flex min-w-0 flex-1 items-center gap-2">
+        <MicOff className="h-4 w-4 shrink-0 text-red-500" strokeWidth={2.5} />
+        <span className="font-serif text-[16px] font-semibold leading-tight text-white">
+          Accessibility access lost
+        </span>
+      </span>
+      <span className="flex shrink-0 flex-col justify-center gap-1.5">
+        <button
+          type="button"
           onClick={onOpenSettings}
           disabled={busy}
           className="flex w-28 items-center justify-center gap-1 rounded-md border border-amber-700/70 bg-amber-900/40 px-2 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-900/60 disabled:opacity-60"
         >
-          Open settings
+          Settings
         </button>
         <button
           type="button"

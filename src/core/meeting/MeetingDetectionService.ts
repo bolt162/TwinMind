@@ -51,12 +51,26 @@ export type MeetingPromptOutcome = 'accepted' | 'dismissed' | 'timed_out';
 export const MEETING_DEBOUNCE_MS = 2_500;
 /**
  * Continuous mic-OFF span required to consider the next mic-start a NEW
- * meeting (and therefore eligible for a fresh prompt). One minute is a
- * heuristic: longer than the typical device-acquire glitch / push-to-talk
- * release / mic-route switch, shorter than the gap between back-to-back
- * real meetings. Tunable; see §8.3.
+ * meeting (and therefore eligible for a fresh prompt).
+ *
+ * 5 s is a deliberate trade-off between two failure modes:
+ *   - Too short → device-route switches (AirPods → MacBook ~1–3 s) and
+ *     Zoom/Meet audio-session restarts (~1–5 s) look like end-of-call →
+ *     we re-prompt mid-meeting.
+ *   - Too long → genuine back-to-back meetings (e.g., "Leave" then "Join
+ *     next" with no break, ~3–6 s) get lumped into one and the user is
+ *     not prompted for the second.
+ *
+ * 5 s absorbs the typical blip without sacrificing fast back-to-backs.
+ * Was 60 s historically; lowered after user feedback that back-to-back
+ * calls were missing prompts. Tunable; see §8.3.
+ *
+ * NOTE: any time-based heuristic has the same fundamental ambiguity
+ * (mic-off → mic-on within N seconds: same meeting or different?).
+ * Disambiguating that requires audio-process attribution (which app
+ * owns the mic), which is private-API territory on macOS.
  */
-export const MEETING_RESET_QUIET_MS = 60_000;
+export const MEETING_RESET_QUIET_MS = 5_000;
 
 export class MeetingDetectionService {
   private readonly emitter = new EventEmitter();

@@ -254,7 +254,12 @@ export const PushSchemas = {
   }),
   [PUSH.MIC_PERMISSION_REQUIRED]: z.object({
     mode: z.enum(['dictation', 'meeting']),
+    grant: z.enum(['denied', 'not_determined', 'unavailable']),
   }),
+  [PUSH.ACCESSIBILITY_LOST]: z.object({
+    granted: z.boolean(),
+  }),
+  [PUSH.HUD_CLIPBOARD_TOAST]: z.object({}).strict(),
   [PUSH.UPDATE_STATE_CHANGED]: updateStateChanged,
 } as const;
 
@@ -401,6 +406,8 @@ const hudSetVisualStateInput = z.object({
     'dictationLimit',
     'disconnected',
     'micPermission',
+    'accessibilityRequired',
+    'copiedToast',
   ]),
 });
 

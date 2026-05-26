@@ -41,6 +41,24 @@ export const PUSH = {
    */
   MIC_PERMISSION_REQUIRED: 'mic_permission_required',
   /**
+   * Sent from main when the macOS Accessibility grant changes for the app
+   * mid-session (revoked or re-granted). Payload `granted: false` tells the
+   * HUD to show a "Re-grant Accessibility" banner; `granted: true` tells it
+   * to dismiss. The accessibility-revoked path also internally stops the
+   * Globe-key tap + uiohook to head off the system-freeze bug that an
+   * untrusted CGEventTap can trigger.
+   */
+  ACCESSIBILITY_LOST: 'accessibility_lost',
+  /**
+   * Fired when main has written dictation text to the clipboard but could
+   * NOT synthesize the Cmd-V keystroke (Accessibility denied or native
+   * paste returned false). HUD transitions the idle pill briefly into a
+   * "Copied to clipboard" toast so the user knows the text is on the
+   * clipboard and they should paste manually. Empty payload — the HUD
+   * already owns the message + timing.
+   */
+  HUD_CLIPBOARD_TOAST: 'hud_clipboard_toast',
+  /**
    * App-update state machine, broadcast by UpdateService. One push per
    * transition (idle/checking/available/downloading/ready/error). The
    * renderer mirrors this into Settings → Updates and (for `ready`) the
@@ -248,14 +266,36 @@ export interface MicDeviceLost {
 
 /**
  * Sent from main when a recording-start attempt was rejected because the
- * macOS microphone permission isn't `granted` (it's `denied`,
- * `not_determined`, or `unavailable`). HUD renders a banner with
- * "Open settings" + "Dismiss"; the orchestrator was never started.
- * `mode` is the user-requested mode so future copy could vary; today
- * the banner text is the same either way.
+ * macOS microphone permission isn't `granted`. HUD renders a banner with
+ * a context-sensitive primary action + Dismiss; the orchestrator was never
+ * started.
+ *
+ * `mode` is the user-requested mode so future copy could vary.
+ *
+ * `grant` is the current TCC state, which the HUD uses to pick the right
+ * primary action:
+ *   - `not_determined` → "Allow" → fires the OS request dialog
+ *     (askForMediaAccess). macOS only adds TwinMind to Privacy →
+ *     Microphone AFTER its first askForMediaAccess call, so deep-linking
+ *     to the panel from this state lands on a list that doesn't contain
+ *     us — useless. We MUST fire the request from this state.
+ *   - `denied` / `unavailable` → "Open settings" → deep-links to Privacy
+ *     → Microphone, where TwinMind is registered with the toggle off.
  */
 export interface MicPermissionRequired {
   readonly mode: 'dictation' | 'meeting';
+  readonly grant: 'denied' | 'not_determined' | 'unavailable';
+}
+
+/**
+ * Sent when macOS Accessibility trust for the app transitions. `granted:
+ * false` means the user (or the OS) flipped the toggle off — Fn dictation
+ * and configurable hotkeys are now disabled, paste falls back to clipboard
+ * only. `granted: true` means trust was restored without an app restart;
+ * the HUD banner clears and Fn / hotkeys come back on their own.
+ */
+export interface AccessibilityLost {
+  readonly granted: boolean;
 }
 
 /**
@@ -539,7 +579,9 @@ export type HudPillVisual =
   | 'failed'
   | 'dictationLimit'
   | 'disconnected'
-  | 'micPermission';
+  | 'micPermission'
+  | 'accessibilityRequired'
+  | 'copiedToast';
 
 export interface HudSetVisualStateInput {
   readonly visual: HudPillVisual;
@@ -645,6 +687,8 @@ export interface PushPayloads {
   [PUSH.SUMMARY_STATE_CHANGED]: SummaryStateChanged;
   [PUSH.HUD_EDGE_ANCHOR]: HudEdgeAnchor;
   [PUSH.MIC_PERMISSION_REQUIRED]: MicPermissionRequired;
+  [PUSH.ACCESSIBILITY_LOST]: AccessibilityLost;
+  [PUSH.HUD_CLIPBOARD_TOAST]: Empty;
   [PUSH.UPDATE_STATE_CHANGED]: UpdateStateChanged;
 }
 

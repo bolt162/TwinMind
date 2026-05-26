@@ -170,13 +170,24 @@ function listInputDevices() {
  */
 function globeKey() {
   const inner = new native.GlobeKey();
-  const listeners = { press: new Set(), release: new Set() };
+  // 'tap_lost' fires when the native callback determined the CGEventTap is
+  // dead — either because macOS revoked Accessibility (UserInput subtype)
+  // or because we tripped the re-enable rate-limit (Timeout subtype with
+  // trust missing or storm). The JS-side manager treats this as "mark
+  // uninstalled and re-arm the trust poll." Without a listener attached
+  // the event is silently dropped; native still tears the tap down.
+  const listeners = { press: new Set(), release: new Set(), tap_lost: new Set() };
   inner.setOnPress(() => {
     for (const cb of listeners.press) cb();
   });
   inner.setOnRelease(() => {
     for (const cb of listeners.release) cb();
   });
+  if (typeof inner.setOnTapLost === 'function') {
+    inner.setOnTapLost(() => {
+      for (const cb of listeners.tap_lost) cb();
+    });
+  }
   return {
     /** Install the CGEventTap. Returns true on success, false if Accessibility
      *  permission is missing. Idempotent while already running. */

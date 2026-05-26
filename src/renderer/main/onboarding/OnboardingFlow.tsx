@@ -127,31 +127,60 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
 }
 
 function MicStep({ onNext }: { onNext: () => void }) {
-  const [granted, setGranted] = useState<boolean | null>(null);
+  // Tri-state grant — `denied` and `not_determined` need different click
+  // behavior (see `request` below), so a boolean wouldn't be expressive
+  // enough. `unavailable` is collapsed into `denied` since the user-facing
+  // remediation is the same (flip the toggle in System Settings).
+  type GrantState = 'granted' | 'denied' | 'not_determined';
+  const [grant, setGrant] = useState<GrantState>('not_determined');
   const [requesting, setRequesting] = useState(false);
 
-  // Read the OS grant on mount so a prior install's "granted" shows the
-  // check immediately, without making the user click Grant again.
+  // Read the OS grant on mount AND poll every 1s while the step is mounted.
+  // The poll covers the denied → grant path: when the user clicks Grant
+  // while denied, we open System Settings → Privacy → Microphone; the user
+  // flips the toggle and returns to TwinMind. The poll catches the flip and
+  // updates the UI to "Granted ✓" + "Continue" without re-clicking.
+  // (Same pattern as AccessibilityStep below.)
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    const tick = async () => {
       try {
         const r = await window.electronAPI.permissions.read({ kind: 'mic' });
-        if (!cancelled) setGranted(r.grant === 'granted' ? true : null);
+        if (cancelled) return;
+        if (r.grant === 'granted') setGrant('granted');
+        else if (r.grant === 'not_determined') setGrant('not_determined');
+        else setGrant('denied'); // 'denied' | 'unavailable'
       } catch {
-        /* ignore */
+        /* ignore transient IPC errors */
       }
-    })();
+    };
+    void tick();
+    const id = setInterval(tick, 1000);
     return () => {
       cancelled = true;
+      clearInterval(id);
     };
   }, []);
 
+  // Branch on the current grant state:
+  //   not_determined → askForMediaAccess shows the OS prompt; we set the
+  //                    new grant from its boolean return.
+  //   denied         → askForMediaAccess silently returns false WITHOUT a
+  //                    prompt (macOS rule once the user has chosen deny),
+  //                    which is why the old single-path Grant button
+  //                    appeared to do nothing. Open Privacy → Microphone
+  //                    so the user has a one-click path to fix it; the
+  //                    1s poll above will see the flip and reach 'granted'.
+  //   granted        → no-op (button is hidden in this state).
   const request = async () => {
     setRequesting(true);
     try {
+      if (grant === 'denied') {
+        await window.electronAPI.permissions.openSystemSettings({ kind: 'mic' });
+        return;
+      }
       const r = await window.electronAPI.permissions.requestMic();
-      setGranted(r.granted);
+      setGrant(r.granted ? 'granted' : 'denied');
     } finally {
       setRequesting(false);
     }
@@ -165,22 +194,22 @@ function MicStep({ onNext }: { onNext: () => void }) {
       <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
         <Mic className="h-6 w-6 text-zinc-300" />
         <div className="text-sm text-zinc-300">
-          {granted === true && <span className="text-emerald-400">Granted ✓</span>}
-          {granted === false && (
+          {grant === 'granted' && <span className="text-emerald-400">Granted ✓</span>}
+          {grant === 'denied' && (
             <span className="text-amber-400">
-              Denied. Open System Settings → Privacy → Microphone to grant manually.
+              Denied. Click Grant to open System Settings → Privacy → Microphone.
             </span>
           )}
-          {granted === null && 'Click below to request.'}
+          {grant === 'not_determined' && 'Click below to request.'}
         </div>
       </div>
       <div className="flex items-center gap-3">
-        {granted !== true && (
+        {grant !== 'granted' && (
           <PrimaryButton onClick={request} disabled={requesting}>
-            {requesting ? 'Requesting…' : 'Grant'}
+            {requesting ? (grant === 'denied' ? 'Opening…' : 'Requesting…') : 'Grant'}
           </PrimaryButton>
         )}
-        <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+        <SecondaryButton onClick={onNext}>{grant === 'granted' ? 'Continue' : 'Skip for now'}</SecondaryButton>
       </div>
     </>
   );

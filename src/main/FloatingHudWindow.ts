@@ -88,6 +88,10 @@ const VISUAL_BOUNDS: Record<HudPillVisual, { width: number; height: number }> = 
   dictationLimit: { width: 400, height: 100 },
   disconnected: { width: 400, height: 100 },
   micPermission: { width: 400, height: 100 },
+  accessibilityRequired: { width: 400, height: 100 },
+  // Toast pill: idle-height, wider to fit "Copied to clipboard ✓".
+  // Animates back to idle bounds after the 2 s fade.
+  copiedToast: { width: 180, height: 32 },
 };
 
 export class FloatingHudWindow {

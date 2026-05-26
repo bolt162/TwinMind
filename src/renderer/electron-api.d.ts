@@ -155,6 +155,12 @@ declare global {
         micPermissionRequired(
           cb: (e: PushPayloads['mic_permission_required']) => void,
         ): () => void;
+        accessibilityLost(
+          cb: (e: PushPayloads['accessibility_lost']) => void,
+        ): () => void;
+        hudClipboardToast(
+          cb: (e: PushPayloads['hud_clipboard_toast']) => void,
+        ): () => void;
         updateStateChanged(
           cb: (e: PushPayloads['update_state_changed']) => void,
         ): () => void;

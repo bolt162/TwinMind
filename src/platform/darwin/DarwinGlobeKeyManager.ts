@@ -27,6 +27,14 @@ interface NativeGlobeKey {
   stop(): void;
   on(event: 'press', cb: () => void): () => void;
   on(event: 'release', cb: () => void): () => void;
+  /**
+   * Fired when the native CGEventTap detected an unrecoverable disable
+   * (Accessibility revoked, or repeated re-enable failures). The native
+   * side has already torn down the tap; the manager should mark the tap
+   * uninstalled and re-arm the retry poll so re-granting recovers
+   * automatically without an app restart.
+   */
+  on(event: 'tap_lost', cb: () => void): () => void;
 }
 
 interface NativeModule {
@@ -124,7 +132,26 @@ export class DarwinGlobeKeyManager implements IGlobeKeyManager {
     const inst = mod.globeKey();
     inst.on('press', () => this.fanout(this.pressHandlers, 'press'));
     inst.on('release', () => this.fanout(this.releaseHandlers, 'release'));
+    inst.on('tap_lost', () => this.onTapLost());
     return inst;
+  }
+
+  /**
+   * Native told us the tap is dead. Re-arm exactly the same recovery path
+   * we use when start() returns false: mark uninstalled, log once per
+   * loss event, and let the 2 s poll re-attempt start() — which itself
+   * re-checks AXIsProcessTrustedWithOptions before touching CGEventTap.
+   *
+   * We intentionally do NOT call instance.stop() here: native already
+   * stopped the runloop and released the CFMachPort. Calling stop() again
+   * would just no-op on the worker thread that's already exited.
+   */
+  private onTapLost(): void {
+    if (!this.installed && this.retryTimer) return;
+    this.installed = false;
+    this.accessibilityWarned = false; // re-arm the one-shot warning
+    this.logger.warn('globe-key tap lost (Accessibility likely revoked); will retry every 2s');
+    this.scheduleRetry();
   }
 
   private scheduleRetry(): void {

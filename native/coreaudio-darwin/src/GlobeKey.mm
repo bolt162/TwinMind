@@ -35,6 +35,11 @@ constexpr CGEventType kNSSystemDefined = (CGEventType)14;
 struct GlobeCtx {
   Napi::ThreadSafeFunction onPress;
   Napi::ThreadSafeFunction onRelease;
+  // Fired (fire-and-forget, non-blocking) when the tap has been disabled in
+  // a non-recoverable way — currently: macOS revoked Accessibility, or we
+  // detected a re-enable storm on the Timeout branch. JS layer treats this
+  // as "tap is dead; mark uninstalled and re-poll trust before retrying."
+  Napi::ThreadSafeFunction onTapLost;
   CFMachPortRef tap = NULL;
   CFRunLoopSourceRef source = NULL;
   CFRunLoopRef runLoop = NULL;
@@ -45,17 +50,92 @@ struct GlobeCtx {
   bool tapCreated = false;
   bool fnDown = false;
   bool stopping = false;
+  // Re-enable budget for the kCGEventTapDisabledByTimeout branch. If macOS
+  // keeps disabling the tap within a short window we treat it as "lost" and
+  // tear down — otherwise we'd spin the runloop thread at 100% CPU and
+  // (because we sit at kCGHeadInsertEventTap) freeze keyboard input
+  // system-wide. This is the defense-in-depth backstop for the
+  // accessibility-revoked path, which we also detect explicitly via the
+  // distinct kCGEventTapDisabledByUserInput subtype below.
+  int reenableCount = 0;
+  CFAbsoluteTime reenableWindowStart = 0;
 };
+
+// Max consecutive timeout-driven re-enables allowed inside the
+// REENABLE_WINDOW_S window before we declare the tap lost. Kept loose
+// enough that the legitimate JNativeHook-bug timeout (referenced by
+// libuiohook) still recovers cleanly.
+constexpr int kMaxReenablesInWindow = 5;
+constexpr CFAbsoluteTime kReenableWindowS = 5.0;
+
+// Signal "tap is lost"; called from the callback thread. Fires the JS
+// notification and stops the runloop so the worker thread exits and the
+// existing cleanup block at the bottom of the NSThread block releases the
+// CFMachPort + source. No direct CFRelease from here — that's the worker
+// thread's job.
+static void SignalTapLost(GlobeCtx *ctx) {
+  if (!ctx) return;
+  if (ctx->onTapLost) {
+    ctx->onTapLost.NonBlockingCall(static_cast<void *>(nullptr),
+        [](Napi::Env env, Napi::Function jsCallback, void *) {
+          jsCallback.Call({});
+        });
+  }
+  ctx->tapCreated = false;
+  if (ctx->tap) {
+    // Disable the tap immediately so macOS doesn't keep dispatching events
+    // into our callback during the brief window before CFRunLoopRun returns.
+    CGEventTapEnable(ctx->tap, false);
+  }
+  if (ctx->runLoop) {
+    CFRunLoopStop(ctx->runLoop);
+  }
+}
 
 static CGEventRef EventTapCallback(CGEventTapProxy proxy, CGEventType type,
                                    CGEventRef event, void *refcon) {
   auto *ctx = (GlobeCtx *)refcon;
   if (!ctx) return event;
 
-  // macOS disables taps that take too long or that the user interrupted.
-  // Re-enable so we don't go dead until the next restart.
-  if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-    if (ctx->tap) CGEventTapEnable(ctx->tap, true);
+  // macOS disables taps in two distinct ways — we MUST treat them
+  // differently. Conflating them is what previously froze the whole system
+  // when the user revoked Accessibility (the loop below would re-enable a
+  // tap macOS instantly re-disabled, spinning the callback thread and
+  // starving every keyboard consumer on the machine, since we sit at
+  // kCGHeadInsertEventTap).
+  //
+  //   kCGEventTapDisabledByTimeout    → benign macOS bug; safe to re-enable.
+  //     (See JNativeHook discussion linked in libuiohook's input_hook.c.)
+  //     We still re-check trust and rate-limit re-enables to bound the
+  //     worst case.
+  //
+  //   kCGEventTapDisabledByUserInput  → user / OS disabled us — e.g. the
+  //     Accessibility toggle was flipped off in System Settings. The
+  //     process is no longer trusted; re-enabling is what causes the
+  //     runaway loop. Tear down and notify JS instead.
+  if (type == kCGEventTapDisabledByUserInput) {
+    SignalTapLost(ctx);
+    return event;
+  }
+  if (type == kCGEventTapDisabledByTimeout) {
+    if (!ctx->tap) return event;
+    // If trust has been revoked, the disable likely WILL repeat on every
+    // re-enable. Bail out the same way we do for UserInput.
+    if (!AXIsProcessTrustedWithOptions(NULL)) {
+      SignalTapLost(ctx);
+      return event;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - ctx->reenableWindowStart > kReenableWindowS) {
+      ctx->reenableWindowStart = now;
+      ctx->reenableCount = 0;
+    }
+    ctx->reenableCount++;
+    if (ctx->reenableCount > kMaxReenablesInWindow) {
+      SignalTapLost(ctx);
+      return event;
+    }
+    CGEventTapEnable(ctx->tap, true);
     return event;
   }
 
@@ -131,6 +211,7 @@ class GlobeKey : public Napi::ObjectWrap<GlobeKey> {
       InstanceMethod("stop", &GlobeKey::Stop),
       InstanceMethod("setOnPress", &GlobeKey::SetOnPress),
       InstanceMethod("setOnRelease", &GlobeKey::SetOnRelease),
+      InstanceMethod("setOnTapLost", &GlobeKey::SetOnTapLost),
     });
     auto ref = Napi::Persistent(func);
     ref.SuppressDestruct();
@@ -170,6 +251,15 @@ class GlobeKey : public Napi::ObjectWrap<GlobeKey> {
     return env.Undefined();
   }
 
+  Napi::Value SetOnTapLost(const Napi::CallbackInfo &info) {
+    Napi::Env env = info.Env();
+    if (!info[0].IsFunction()) return env.Undefined();
+    if (ctx_->onTapLost) ctx_->onTapLost.Release();
+    ctx_->onTapLost = Napi::ThreadSafeFunction::New(
+        env, info[0].As<Napi::Function>(), "globekey_tap_lost", 0, 1);
+    return env.Undefined();
+  }
+
   // Returns true iff the CGEventTap was created (i.e., Accessibility is
   // granted). Idempotent: re-calling Start() while running is a no-op.
   Napi::Value Start(const Napi::CallbackInfo &info) {
@@ -194,6 +284,8 @@ class GlobeKey : public Napi::ObjectWrap<GlobeKey> {
     ctx_->tapCreated = false;
     ctx_->fnDown = false;
     ctx_->stopping = false;
+    ctx_->reenableCount = 0;
+    ctx_->reenableWindowStart = 0;
     ctx_->readySem = dispatch_semaphore_create(0);
 
     GlobeCtx *ctx = ctx_;
@@ -268,7 +360,8 @@ class GlobeKey : public Napi::ObjectWrap<GlobeKey> {
       CFRunLoopStop(ctx_->runLoop);
     }
     // Release JS callback refs so V8 can GC the closures. New ones can be
-    // attached via SetOnPress/SetOnRelease before the next Start().
+    // attached via SetOnPress/SetOnRelease/SetOnTapLost before the next
+    // Start().
     if (ctx_->onPress) {
       ctx_->onPress.Release();
       ctx_->onPress = Napi::ThreadSafeFunction();
@@ -276,6 +369,10 @@ class GlobeKey : public Napi::ObjectWrap<GlobeKey> {
     if (ctx_->onRelease) {
       ctx_->onRelease.Release();
       ctx_->onRelease = Napi::ThreadSafeFunction();
+    }
+    if (ctx_->onTapLost) {
+      ctx_->onTapLost.Release();
+      ctx_->onTapLost = Napi::ThreadSafeFunction();
     }
     // Don't block: the worker exits within a CFRunLoop tick. The destructor
     // is the only place we need to be strict, and JS owns the wrapper's

@@ -17,7 +17,7 @@
  * — uiohook doesn't see Fn on macOS.
  */
 
-import { globalShortcut } from 'electron';
+import { globalShortcut, systemPreferences } from 'electron';
 import type {
   IHotkeyManager,
   PressReleaseBinding,
@@ -163,6 +163,52 @@ export class DarwinHotkeyManager implements IHotkeyManager {
     };
   }
 
+  /**
+   * Stop uiohook WITHOUT clearing any registered press/release bindings,
+   * fire synthetic releases for anything currently pressed, and zero out
+   * `heldKeycodes` so a fresh start() doesn't believe a phantom key is
+   * still down.
+   *
+   * Used by the accessibility watcher: when macOS revokes Accessibility we
+   * stop uiohook proactively so libuiohook isn't running an event tap
+   * under a now-untrusted process — and we keep `pressReleases` intact so
+   * the SAME bindings come back online when trust is regained.
+   *
+   * Idempotent.
+   */
+  stopUio(): void {
+    for (const entry of this.pressReleases.values()) {
+      if (entry.pressed) {
+        entry.pressed = false;
+        try {
+          entry.onRelease();
+        } catch {
+          /* user callback */
+        }
+      }
+    }
+    this.heldKeycodes.clear();
+    if (this.uio && this.uioStarted) {
+      try {
+        this.uio.stop();
+      } catch {
+        /* best-effort */
+      }
+      this.uioStarted = false;
+    }
+  }
+
+  /**
+   * Re-arm uiohook after a prior stopUio(). No-op if uiohook is already
+   * running or no press/release bindings exist (deferred-start path —
+   * ensureUio is invoked on the next registerPressRelease).
+   */
+  restartUio(): void {
+    if (this.uioStarted) return;
+    if (this.pressReleases.size === 0) return;
+    this.ensureUio();
+  }
+
   /** Tear down all bindings; called from app `before-quit`. */
   unregisterAll(): void {
     for (const acc of this.taps) globalShortcut.unregister(acc);
@@ -188,16 +234,33 @@ export class DarwinHotkeyManager implements IHotkeyManager {
     }
   }
 
-  /** Lazy-load + start uiohook when the first press/release binding is added. */
+  /**
+   * Lazy-load + start uiohook when the first press/release binding is added.
+   *
+   * Defers `uio.start()` if Accessibility isn't granted: libuiohook installs
+   * a CGEventTap at kCGHeadInsertEventTap, which can wedge under an
+   * untrusted process. Bindings stay queued in `pressReleases`; the
+   * accessibility watcher calls `restartUio()` once trust is regained.
+   */
   private ensureUio(): void {
     if (this.uioStarted) return;
+    if (process.platform === 'darwin' && !systemPreferences.isTrustedAccessibilityClient(false)) {
+      this.logger.warn('uiohook start deferred: Accessibility not granted');
+      return;
+    }
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const mod = require('uiohook-napi') as UiohookModule;
-      this.uio = mod.uIOhook;
-      UiohookKey = mod.UiohookKey;
-      this.uio.on('keydown', (e) => this.dispatch(e, 'down'));
-      this.uio.on('keyup', (e) => this.dispatch(e, 'up'));
+      // Cache the module + key table on the FIRST load, then reuse across
+      // stop/restart cycles. uIOhook is a singleton inside the package —
+      // re-requiring is fine, but re-binding our 'keydown'/'keyup'
+      // listeners on every restart would fan-out duplicates.
+      if (!this.uio) {
+        this.uio = mod.uIOhook;
+        UiohookKey = mod.UiohookKey;
+        this.uio.on('keydown', (e) => this.dispatch(e, 'down'));
+        this.uio.on('keyup', (e) => this.dispatch(e, 'up'));
+      }
       this.uio.start();
       this.uioStarted = true;
     } catch (err) {

@@ -62,6 +62,7 @@ import { DarwinNotificationService } from '@platform/darwin/DarwinNotificationSe
 import { DarwinHotkeyManager } from '@platform/darwin/DarwinHotkeyManager';
 import { DarwinGlobeKeyManager } from '@platform/darwin/DarwinGlobeKeyManager';
 import { DarwinDeviceMonitor } from '@platform/darwin/DarwinDeviceMonitor';
+import { AccessibilityWatcher } from '@platform/darwin/AccessibilityWatcher';
 import type { IMicActivityMonitor } from '@platform/IMicActivityMonitor';
 import type { IGlobeKeyManager } from '@platform/IGlobeKeyManager';
 import { hotkeysEqual, type Hotkey } from '@core/hotkey/HotkeyTypes';
@@ -192,6 +193,14 @@ let audioPort: MessagePortMain | null = null;
 let bridge: IpcBridgeMain | null = null;
 let tray: TrayManager | null = null;
 let updateService: UpdateService | null = null;
+/**
+ * Watches macOS Accessibility trust for transitions while the app is running.
+ * On revoke: proactively stop the Globe-key CGEventTap and uiohook (also a
+ * CGEventTap) before either can wedge under an untrusted process, then push
+ * a banner. On re-grant: restart both and dismiss the banner. Constructed in
+ * app.whenReady, disposed in before-quit.
+ */
+let accessibilityWatcher: AccessibilityWatcher | null = null;
 
 /**
  * Machine-scoped UI gate. True once the wizard has been completed at least
@@ -459,9 +468,13 @@ function ensureMicGrantedOrBanner(mode: 'dictation' | 'meeting'): boolean {
   const targets: WebContents[] = [];
   if (hud) targets.push(hud.webContents());
   for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  // `grant` here is one of: 'denied' | 'not_determined' | 'unavailable'
+  // (granted was returned above). The HUD picks the right primary action
+  // based on this — see `MicPermissionBanner` in HudApp.tsx and the
+  // MicPermissionRequired payload doc in channels.ts.
   for (const wc of targets) {
     try {
-      bridge.broadcast(wc, PUSH.MIC_PERMISSION_REQUIRED, { mode });
+      bridge.broadcast(wc, PUSH.MIC_PERMISSION_REQUIRED, { mode, grant });
     } catch {
       /* renderer torn down */
     }
@@ -1021,7 +1034,21 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
         .filter((t) => t.length > 0)
         .join(' ');
       if (text.length > 0) {
-        void s.platform.paste.paste(text);
+        // We always write to clipboard FIRST (DarwinPasteService line 34),
+        // then attempt the Cmd-V keystroke. When Accessibility is denied
+        // (or the native paste fails for any other reason) we get back
+        // `clipboardOnly: true` — the text is on the user's clipboard but
+        // didn't paste into the active app. Surface a brief HUD toast so
+        // the user knows the text is there and they should ⌘V manually.
+        void s.platform.paste.paste(text).then((r) => {
+          if (!r.clipboardOnly) return;
+          if (!bridge || !hud) return;
+          try {
+            bridge.broadcast(hud.webContents(), PUSH.HUD_CLIPBOARD_TOAST, {});
+          } catch {
+            /* HUD torn down */
+          }
+        });
       }
     },
   });
@@ -1600,6 +1627,26 @@ async function fireSummary(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * Broadcast the latest accessibility-grant state to every renderer. Called
+ * by the AccessibilityWatcher on transitions; the HUD shows / clears a
+ * banner so the user knows Fn + hotkeys won't work without Accessibility.
+ */
+function broadcastAccessibilityLost(granted: boolean): void {
+  if (!bridge) return;
+  const payload = { granted };
+  const targets: WebContents[] = [];
+  if (hud) targets.push(hud.webContents());
+  for (const w of BrowserWindow.getAllWindows()) targets.push(w.webContents);
+  for (const wc of targets) {
+    try {
+      bridge.broadcast(wc, PUSH.ACCESSIBILITY_LOST, payload);
+    } catch {
+      /* renderer gone */
+    }
+  }
+}
+
 function broadcastAuthState(): void {
   if (!bridge || !shell) return;
   const payload = shell.authProvider.getViewState();
@@ -1768,6 +1815,62 @@ app.whenReady().then(async () => {
   shell = buildShell({ audioLink, platform, appVersion: app.getVersion() });
   shell.platform.deviceMonitor.start();
 
+  // 2a. Accessibility watcher. Polls TCC trust state every ~1.5s and reacts
+  // to transitions. Critical for the system-freeze fix: when the user
+  // revokes Accessibility mid-session, we proactively stop the Globe-key
+  // CGEventTap and uiohook before either can wedge under an untrusted
+  // process, then push a banner to the HUD. Re-grant restarts both
+  // without an app restart. Darwin-only — the watcher is a no-op observer
+  // on other platforms but constructing it is still safe.
+  if (process.platform === 'darwin') {
+    accessibilityWatcher = new AccessibilityWatcher();
+    accessibilityWatcher.onChange((granted) => {
+      if (!shell) return;
+      shell.logger.info('accessibility grant changed', { granted });
+      if (granted) {
+        // Re-grant: restart the Globe tap (its internal AX precheck will
+        // confirm trust before touching CGEventTapCreate) and re-arm
+        // uiohook if any press/release bindings are still registered.
+        try {
+          shell.platform.globeKey?.start();
+        } catch (err) {
+          shell.logger.warn('globe-key restart after re-grant threw', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        try {
+          (shell.platform.hotkeys as DarwinHotkeyManager).restartUio?.();
+        } catch (err) {
+          shell.logger.warn('uiohook restart after re-grant threw', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else {
+        // Revoke: stop both taps proactively. Native GlobeKey will also
+        // self-heal via its tap_lost path when the OS fires the disabled
+        // event, but stopping here closes the race where the user revokes
+        // while no key is held (no events flowing → disabled callback may
+        // not fire promptly).
+        try {
+          shell.platform.globeKey?.stop();
+        } catch (err) {
+          shell.logger.warn('globe-key stop on revoke threw', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        try {
+          (shell.platform.hotkeys as DarwinHotkeyManager).stopUio?.();
+        } catch (err) {
+          shell.logger.warn('uiohook stop on revoke threw', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      broadcastAccessibilityLost(granted);
+    });
+    accessibilityWatcher.start();
+  }
+
   // 2b. Auto-update service. Machine-scoped (no per-user state). Disabled
   // automatically in dev / non-darwin. The recording guard reads orchestrator
   // state through a closure — sign-out leaves `composed` null which the
@@ -1875,6 +1978,8 @@ app.on('before-quit', async (event) => {
   event.preventDefault();
   tray?.destroy();
   hud?.destroy();
+  accessibilityWatcher?.stop();
+  accessibilityWatcher = null;
   if (composedBindings) {
     detachComposedBindings(composedBindings);
     composedBindings = null;
