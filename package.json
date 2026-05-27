@@ -1,6 +1,6 @@
 {
   "name": "twinmind",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Desktop dictation + meeting transcription (V2 — utilityProcess audio path, pre-mixed ASR, SQLite outbox).",
   "main": "dist/main/main.js",
