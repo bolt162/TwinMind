@@ -93,8 +93,10 @@ export class DarwinGlobeKeyManager implements IGlobeKeyManager {
       this.instance = null;
     }
     this.installed = false;
-    this.pressHandlers.clear();
-    this.releaseHandlers.clear();
+    // Intentionally preserve press/release handlers across stop/start cycles.
+    // They're JS-side fan-out callbacks with no relationship to the native
+    // CGEventTap — the accessibility-revoke path calls stop() and we want
+    // the SAME handlers to fire when the tap is re-installed on regrant.
   }
 
   onPress(handler: () => void): () => void {

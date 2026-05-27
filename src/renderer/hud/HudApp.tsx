@@ -1313,7 +1313,7 @@ function AccessibilityBanner({ onDismiss }: { onDismiss: () => void }) {
       <span className="flex min-w-0 flex-1 items-center gap-2">
         <MicOff className="h-4 w-4 shrink-0 text-red-500" strokeWidth={2.5} />
         <span className="font-serif text-[16px] font-semibold leading-tight text-white">
-          Accessibility access lost
+          Accessibility access required
         </span>
       </span>
       <span className="flex shrink-0 flex-col justify-center gap-1.5">

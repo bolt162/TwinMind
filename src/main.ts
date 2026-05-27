@@ -679,7 +679,8 @@ function wireIpc(b: IpcBridgeMain): void {
         primaryHotkey: nextHotkey,
         primaryHotkeyUnregister: newUnregister,
       };
-      ensureFnFreedIfHotkeyIsFn(nextHotkey, requireShell().logger);
+      const s = requireShell();
+      syncFnUsageForHotkey(nextHotkey, { globalDb: s.globalDb, logger: s.logger });
       broadcastHotkeyChanged(nextHotkey);
     }
     c.notifySettingsChanged();
@@ -967,28 +968,108 @@ function isFnOnlyHotkey(h: Hotkey): boolean {
   return h.modifiers.length === 1 && h.modifiers[0] === 'Fn' && h.key === null;
 }
 
-function ensureFnFreedIfHotkeyIsFn(
-  hotkey: Hotkey | null,
-  logger: Shell['logger'],
-): void {
-  if (process.platform !== 'darwin') return;
-  if (hotkey !== null && !isFnOnlyHotkey(hotkey)) return;
+/**
+ * Sentinel persisted in `globalDb.kv['fn_usage_type_saved']` to mean "the OS
+ * was already at 0 when we first looked, so we don't own that state and
+ * have nothing to restore."
+ */
+const FN_USAGE_NOT_OWNED = '__none__';
+
+/**
+ * Lazy-load the native Fn-usage helper. Returns null on non-darwin, when
+ * the addon is missing, or when the export is unavailable. All failure
+ * modes are silent — best-effort, never a regression versus pre-helper.
+ */
+function loadFnUsageNative(logger: Shell['logger']): {
+  get(): number | null;
+  set(value: number): boolean;
+} | null {
+  if (process.platform !== 'darwin') return null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const native = require('@twinmind/coreaudio-darwin') as {
       fnUsageType?: () => { get(): number | null; set(value: number): boolean };
     };
-    const fn = native.fnUsageType?.();
-    if (!fn) return;
-    const current = fn.get();
-    if (current === 0) return;
-    const ok = fn.set(0);
-    logger.info('fn-usage-type set to 0 (Do Nothing)', { previous: current, ok });
+    return native.fnUsageType?.() ?? null;
   } catch (err) {
-    logger.warn('fn-usage-type set skipped (native helper unavailable)', {
+    logger.warn('fn-usage-type native helper unavailable', {
       message: err instanceof Error ? err.message : String(err),
     });
+    return null;
   }
+}
+
+/**
+ * Sync the macOS "Press 🌐 key to:" preference against the active hotkey.
+ *
+ *  - Target=Fn (hotkey is null OR Fn-only): record the user's current
+ *    value (or a "not-owned" sentinel if it was already 0), then set 0.
+ *  - Target=non-Fn: restore the previously saved value if we still own
+ *    the state (OS still at 0). If the user changed it externally we
+ *    silently relinquish ownership without overwriting.
+ *
+ * The saved value lives in GlobalDb.kv so a crash / force-kill / mid-
+ * session quit still restores on next launch. Machine-scoped because the
+ * OS preference is too.
+ */
+function syncFnUsageForHotkey(
+  hotkey: Hotkey | null,
+  deps: { globalDb: Shell['globalDb']; logger: Shell['logger'] },
+): void {
+  const fn = loadFnUsageNative(deps.logger);
+  if (!fn) return;
+  const target = hotkey === null || isFnOnlyHotkey(hotkey);
+  const cur = fn.get();
+  const saved = deps.globalDb.getFnUsageSaved();
+  if (target) {
+    if (cur === 0) {
+      if (saved === null) deps.globalDb.setFnUsageSaved(FN_USAGE_NOT_OWNED);
+      return;
+    }
+    if (saved === null) deps.globalDb.setFnUsageSaved(String(cur));
+    const ok = fn.set(0);
+    deps.logger.info('fn-usage-type set to 0 (Do Nothing)', { previous: cur, ok });
+  } else {
+    restoreFnUsageIfOwned(deps);
+  }
+}
+
+/**
+ * Restore the saved AppleFnUsageType value if we still own the OS state.
+ *
+ * Called when no Fn-driven hotkey is active: sign-out, app quit, and the
+ * non-Fn branch of `syncFnUsageForHotkey`. Idempotent — repeated calls
+ * after a successful restore are no-ops.
+ */
+function restoreFnUsageIfOwned(
+  deps: { globalDb: Shell['globalDb']; logger: Shell['logger'] },
+): void {
+  const saved = deps.globalDb.getFnUsageSaved();
+  if (saved === null) return;
+  if (saved === FN_USAGE_NOT_OWNED) {
+    deps.globalDb.clearFnUsageSaved();
+    return;
+  }
+  const fn = loadFnUsageNative(deps.logger);
+  if (!fn) {
+    // Can't restore without the native helper — but also can't leave a
+    // stale saved record around forever. Clear it; the worst case is the
+    // OS keeps the value it has, which is exactly what the user would
+    // see if we never wrote it in the first place.
+    deps.globalDb.clearFnUsageSaved();
+    return;
+  }
+  const cur = fn.get();
+  if (cur === 0) {
+    const previous = Number.parseInt(saved, 10);
+    if (!Number.isNaN(previous)) {
+      const ok = fn.set(previous);
+      deps.logger.info('fn-usage-type restored', { restored: previous, ok });
+    }
+  }
+  // If cur !== 0, the user changed the value externally — respect that
+  // and drop our record. Either way, our ownership ends here.
+  deps.globalDb.clearFnUsageSaved();
 }
 
 function registerPrimaryHotkey(c: ComposedApp, hotkey: Hotkey): () => void {
@@ -1114,7 +1195,7 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
   const primary = c.settings.load().settings.hotkeys.primary;
   const primaryUnreg =
     primary && !isFnOnlyHotkey(primary) ? registerPrimaryHotkey(c, primary) : null;
-  ensureFnFreedIfHotkeyIsFn(primary, s.logger);
+  syncFnUsageForHotkey(primary, { globalDb: s.globalDb, logger: s.logger });
 
   // ─── Globe (Fn) key ──────────────────────────────────────────────────────
   let globeKeyDispose: (() => void) | null = null;
@@ -1541,6 +1622,12 @@ async function swapComposedTo(userId: string | null): Promise<void> {
       });
     }
     composed = null;
+  }
+  if (userId === null) {
+    // No active user → no active hotkey. Restore the user's prior
+    // AppleFnUsageType so the OS Fn behavior isn't stuck on "Do Nothing"
+    // across sign-out. The next compose (re-sign-in) will re-evaluate.
+    restoreFnUsageIfOwned({ globalDb: s.globalDb, logger: s.logger });
   }
   if (userId !== null) {
     composed = await s.composeForUser(userId);
@@ -2109,6 +2196,14 @@ app.whenReady().then(async () => {
       /* HUD already torn down */
     }
   });
+  // Seed the HUD with the current Accessibility-grant state once it can
+  // subscribe. The watcher only emits on transitions, so without this push
+  // a cold-launch with Accessibility already denied would leave the HUD
+  // banner hidden until the user toggled the permission. Mirrors the
+  // broadcastAuthState / broadcastUpdateState pattern below.
+  hud.webContents().once('did-finish-load', () => {
+    broadcastAccessibilityLost(accessibilityWatcher?.current() ?? true);
+  });
   mainWindow = createMainWindow();
   tray = new TrayManager({ onOpenHome: () => openHome(), logger: shell.logger });
   tray.init();
@@ -2161,6 +2256,9 @@ app.on('before-quit', async (event) => {
     }
     updateService = null;
   }
+  // Restore the user's AppleFnUsageType BEFORE shell.shutdown() closes
+  // globalDb. After this point the kv read/write would throw.
+  restoreFnUsageIfOwned({ globalDb: shell.globalDb, logger: shell.logger });
   await shell.shutdown();
   shell = null;
   audioProcessHandle?.kill();

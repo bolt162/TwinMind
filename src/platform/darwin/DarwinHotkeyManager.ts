@@ -90,6 +90,13 @@ function uiohookNameForKeyCode(code: string): string | null {
 
 export class DarwinHotkeyManager implements IHotkeyManager {
   private uio: UiohookLike | null = null;
+  /** Whether the libuiohook native module is loaded + keydown/keyup listeners
+   *  are wired. Separate from `uioStarted` (which gates the CGEventTap). We
+   *  load eagerly on the first registerPressRelease so `UiohookKey` is
+   *  populated and bindings can be stored — even when Accessibility is
+   *  denied and the tap can't start yet. Loading the module does NOT
+   *  install a CGEventTap; that only happens on `uio.start()`. */
+  private uioModuleLoaded = false;
   private uioStarted = false;
 
   /** Active tap bindings (legacy globalShortcut path). */
@@ -133,7 +140,12 @@ export class DarwinHotkeyManager implements IHotkeyManager {
 
   /** Register a press/release pair via uiohook-napi. */
   registerPressRelease(binding: PressReleaseBinding): () => void {
-    this.ensureUio();
+    // Load the JS module first (populates UiohookKey + attaches listeners)
+    // so compileHotkeyToKeycodes can resolve the keycodes even when
+    // Accessibility is denied and the tap can't start yet. Without this
+    // ordering the binding would be discarded and a later restartUio()
+    // after re-grant would have nothing to install.
+    this.loadUioModule();
     const target = compileHotkeyToKeycodes(binding.hotkey);
     if (!target) {
       this.logger.warn('could not compile hotkey; press/release ignored', {
@@ -141,6 +153,10 @@ export class DarwinHotkeyManager implements IHotkeyManager {
       });
       return () => {};
     }
+    // Now that the binding is compiled, try to start the tap. If Accessibility
+    // is denied this is a no-op; the accessibility watcher will call
+    // restartUio() once trust is regained.
+    this.startUioTap();
     const id = Symbol('press_release_binding');
     this.pressReleases.set(id, {
       target,
@@ -201,12 +217,12 @@ export class DarwinHotkeyManager implements IHotkeyManager {
   /**
    * Re-arm uiohook after a prior stopUio(). No-op if uiohook is already
    * running or no press/release bindings exist (deferred-start path —
-   * ensureUio is invoked on the next registerPressRelease).
+   * startUioTap is invoked on the next registerPressRelease).
    */
   restartUio(): void {
     if (this.uioStarted) return;
     if (this.pressReleases.size === 0) return;
-    this.ensureUio();
+    this.startUioTap();
   }
 
   /** Tear down all bindings; called from app `before-quit`. */
@@ -235,36 +251,51 @@ export class DarwinHotkeyManager implements IHotkeyManager {
   }
 
   /**
-   * Lazy-load + start uiohook when the first press/release binding is added.
+   * Load the libuiohook native module + wire dispatch listeners, but do NOT
+   * start the CGEventTap. Idempotent — runs once, regardless of how many
+   * times registerPressRelease is called. Loading alone does not install
+   * any OS-level hook (that's `uio.start()`), so it's safe even when
+   * Accessibility is denied.
    *
-   * Defers `uio.start()` if Accessibility isn't granted: libuiohook installs
-   * a CGEventTap at kCGHeadInsertEventTap, which can wedge under an
-   * untrusted process. Bindings stay queued in `pressReleases`; the
-   * accessibility watcher calls `restartUio()` once trust is regained.
+   * This exists so `UiohookKey` is populated and `compileHotkeyToKeycodes`
+   * can succeed BEFORE the tap is actually startable. Bindings then land
+   * in `pressReleases` and survive the deferred-start path.
    */
-  private ensureUio(): void {
+  private loadUioModule(): void {
+    if (this.uioModuleLoaded) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require('uiohook-napi') as UiohookModule;
+      this.uio = mod.uIOhook;
+      UiohookKey = mod.UiohookKey;
+      this.uio.on('keydown', (e) => this.dispatch(e, 'down'));
+      this.uio.on('keyup', (e) => this.dispatch(e, 'up'));
+      this.uioModuleLoaded = true;
+    } catch (err) {
+      this.logger.error('uiohook-napi unavailable', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Start the libuiohook CGEventTap. Gated on Accessibility trust — libuiohook
+   * installs at kCGHeadInsertEventTap, which can wedge under an untrusted
+   * process. Bindings stay queued in `pressReleases`; the accessibility
+   * watcher calls `restartUio()` once trust is regained.
+   */
+  private startUioTap(): void {
     if (this.uioStarted) return;
+    if (!this.uioModuleLoaded || !this.uio) return;
     if (process.platform === 'darwin' && !systemPreferences.isTrustedAccessibilityClient(false)) {
       this.logger.warn('uiohook start deferred: Accessibility not granted');
       return;
     }
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require('uiohook-napi') as UiohookModule;
-      // Cache the module + key table on the FIRST load, then reuse across
-      // stop/restart cycles. uIOhook is a singleton inside the package —
-      // re-requiring is fine, but re-binding our 'keydown'/'keyup'
-      // listeners on every restart would fan-out duplicates.
-      if (!this.uio) {
-        this.uio = mod.uIOhook;
-        UiohookKey = mod.UiohookKey;
-        this.uio.on('keydown', (e) => this.dispatch(e, 'down'));
-        this.uio.on('keyup', (e) => this.dispatch(e, 'up'));
-      }
       this.uio.start();
       this.uioStarted = true;
     } catch (err) {
-      this.logger.error('uiohook-napi unavailable', {
+      this.logger.error('uiohook start failed', {
         message: err instanceof Error ? err.message : String(err),
       });
     }

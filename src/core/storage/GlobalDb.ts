@@ -352,6 +352,43 @@ export class GlobalDb {
     return row.v;
   }
 
+  // ─── Fn-usage-type ownership ──────────────────────────────────────────────
+
+  /**
+   * Read the macOS AppleFnUsageType value we recorded before we last
+   * overrode it to 0. Used by main.ts to restore the user's previous
+   * choice when the app no longer needs Fn neutralized (hotkey switched
+   * to non-Fn, sign-out, or app quit).
+   *
+   * Sentinel: stored as the string `'__none__'` when the OS was already at
+   * 0 at the moment we observed it — we don't own that state and won't
+   * write anything on restore.
+   *
+   * Returns null when we haven't recorded anything yet (cold install or
+   * after a successful restore).
+   */
+  getFnUsageSaved(): string | null {
+    const row = this.db
+      .prepare(`SELECT v FROM kv WHERE k = 'fn_usage_type_saved'`)
+      .get() as { v: string } | undefined;
+    return row?.v ?? null;
+  }
+
+  /** Persist the AppleFnUsageType value (or `'__none__'` sentinel) to restore later. */
+  setFnUsageSaved(value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO kv (k, v, updated_at) VALUES ('fn_usage_type_saved', ?, ?)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at`,
+      )
+      .run(value, this.clock.now());
+  }
+
+  /** Drop the saved-fn-usage record. Called after a successful restore (or when we relinquish ownership). */
+  clearFnUsageSaved(): void {
+    this.db.prepare(`DELETE FROM kv WHERE k = 'fn_usage_type_saved'`).run();
+  }
+
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   /** Close the underlying connection. App-shutdown only. */
