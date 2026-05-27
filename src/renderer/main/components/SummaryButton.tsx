@@ -5,8 +5,9 @@
  *               externally via the host-validated MISC_OPEN_EXTERNAL_URL IPC.
  *               Always enabled (user can re-open the link even if the
  *               transcript was wiped client-side).
- *   pending   → "Generating summary…" (disabled). The summary call is in
- *               flight; useSession / useSessions will reload on the next push.
+ *   pending   → "Syncing…" rendered as plain muted text (no button). The
+ *               summary call is in flight; useSession / useSessions reload
+ *               on the next push and swap this for the completed-state pill.
  *   failed    → "Generate summary" — clicking re-fires the request via
  *               SESSION_RETRY_SUMMARY. Same path the auto-trigger uses.
  *   null      → "Generate summary" — auto-trigger hasn't fired yet (e.g.
@@ -43,8 +44,15 @@ export function SummaryButton({
 
   const isCompleted = status === 'completed';
   const isPending = status === 'pending';
+
+  // Pending: no actionable affordance. Render plain muted text so the row
+  // stays clickable (the parent <li> opens the detail view).
+  if (isPending) {
+    return <span className="text-[11px] text-zinc-400">Syncing…</span>;
+  }
+
   // Generate requires transcript text; View has no such requirement.
-  const disabled = isPending || busy || (!isCompleted && !hasText);
+  const disabled = busy || (!isCompleted && !hasText);
 
   const handleClick = async (e: React.MouseEvent) => {
     // Live inside a clickable list row — don't bubble into the row's open.
@@ -72,11 +80,7 @@ export function SummaryButton({
     }
   };
 
-  const label = isPending
-    ? 'Generating summary…'
-    : isCompleted
-      ? 'View Summary'
-      : 'Generate summary';
+  const label = isCompleted ? 'View Summary' : 'Generate summary';
 
   // Completed-state styling switches on `variant`: prominent (default) is
   // the solid white pill used in SessionDetail; outline is a transparent

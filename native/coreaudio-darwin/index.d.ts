@@ -94,3 +94,19 @@ export interface IFnUsageTypeLike {
   set(value: number): boolean;
 }
 export declare function fnUsageType(): IFnUsageTypeLike;
+
+/**
+ * macOS TCC state for kTCCServiceAudioCapture (NSAudioCaptureUsageDescription).
+ * Synchronous database lookup; safe to call from any thread, including while
+ * audiotee is recording. 'unavailable' means the private TCC symbol couldn't
+ * be resolved on this macOS version — treat as 'not_determined' for UI.
+ */
+export type AudioCaptureGrant = 'authorized' | 'denied' | 'not_determined' | 'unavailable';
+export declare function audioCapturePreflight(): AudioCaptureGrant;
+
+/**
+ * Trigger the OS prompt for audio-capture if state is not_determined; resolve
+ * with the current grant otherwise. Never throws. Resolves with one of
+ * 'authorized' | 'denied' | 'unavailable'.
+ */
+export declare function audioCaptureRequest(): Promise<'authorized' | 'denied' | 'unavailable'>;

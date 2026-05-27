@@ -32,12 +32,13 @@ const TABS: ReadonlyArray<{ id: Tab; label: string; icon: typeof Home }> = [
 
 export function Layout({ tab, onTabChange, children }: LayoutProps) {
   return (
-    <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
+    <div data-testid="app-layout" className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-800 px-4 pt-3 pb-2">
         <div className="flex items-center justify-between">
           <h1 className="text-sm font-semibold tracking-tight text-zinc-200">TwinMind</h1>
           <button
             type="button"
+            data-testid="view-web-button"
             onClick={() => {
               void window.electronAPI.main.openWebApp().catch(() => {});
             }}
@@ -53,6 +54,8 @@ export function Layout({ tab, onTabChange, children }: LayoutProps) {
             <button
               key={id}
               type="button"
+              data-testid={`tab-${id}`}
+              data-active={tab === id ? 'true' : 'false'}
               onClick={() => onTabChange(id)}
               className={cn(
                 'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',

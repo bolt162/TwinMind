@@ -57,11 +57,13 @@ export function SettingsPage() {
 
       <Section title="Meeting auto-detection">
         <Toggle
+          testId="settings-meeting-detect-enabled"
           label="Detect when another app opens the mic"
           checked={Boolean(meeting.enabled ?? true)}
           onChange={(v) => setPath('meetingDetection.enabled', v)}
         />
         <Toggle
+          testId="settings-meeting-detect-autostart"
           label="Auto-start recording on detection (no prompt)"
           checked={Boolean(meeting.autoStart ?? false)}
           onChange={(v) => setPath('meetingDetection.autoStart', v)}
@@ -373,10 +375,12 @@ function Toggle({
   label,
   checked,
   onChange,
+  testId,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  testId?: string;
 }) {
   return (
     <label className="flex items-center justify-between gap-3 text-sm">
@@ -385,6 +389,7 @@ function Toggle({
         type="button"
         role="switch"
         aria-checked={checked}
+        data-testid={testId}
         onClick={() => onChange(!checked)}
         className={cn(
           'relative h-5 w-9 shrink-0 rounded-full transition-colors',
@@ -469,6 +474,7 @@ function InputDeviceField({
       <span className="text-sm">Input device</span>
       <div className="flex items-center gap-2">
         <select
+          data-testid="settings-input-device-select"
           value={value ?? ''}
           onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
           // Fixed width + truncate keeps the closed dropdown from auto-resizing
@@ -531,8 +537,7 @@ function InputDeviceField({
 // skipped during onboarding. macOS does not let us programmatically revoke
 // or toggle a grant — the user always has to flip the switch in System
 // Settings — but we CAN:
-//   - Fire the OS request dialog when the state is `not_determined` (mic /
-//     accessibility) or probe via audiotee (system audio).
+//   - Fire the OS request dialog when the state is `not_determined`.
 //   - Deep-link to the matching Privacy & Security pane on `denied` so the
 //     user has a one-click path to the toggle that matters.
 //
@@ -545,14 +550,12 @@ function InputDeviceField({
 //   - Accessibility: API conflates `denied` and `not_determined` into "not
 //     trusted". The global AccessibilityWatcher already polls; we subscribe
 //     to its `PUSH.ACCESSIBILITY_LOST` push for live updates here.
-//   - System audio: ZERO introspection. We persist a localStorage hint
-//     after a successful probe; the user can re-probe via the "Re-check"
-//     button. The hint goes stale after an out-of-app revoke — the only
-//     way to verify is to re-run audiotee, hence the explicit button.
+//   - System audio: real introspection via TCC.framework's TCCAccessPreflight
+//     against kTCCServiceAudioCapture (wired through the native addon).
+//     Same 2s poll pattern as mic — a revoke via System Settings is reflected
+//     within one tick.
 
 type GrantState = 'granted' | 'denied' | 'not_determined' | 'unavailable';
-
-const AUDIO_CAP_HINT_KEY = 'twinmind.permissions.audioCaptureGranted';
 
 function PermissionsCard() {
   return (
@@ -717,83 +720,67 @@ function MicrophoneRow() {
 }
 
 /**
- * System audio row — no introspection API exists on macOS. We persist a
- * "previously granted" hint in localStorage after a successful audiotee
- * probe; the `requestAudioCapture` IPC re-runs that probe (which surfaces
- * the OS prompt the first time and silently returns false thereafter if
- * the user has denied). The hint is per-machine and can go stale after an
- * out-of-app revoke, so we always offer a "Re-check" affordance.
- *
- * Three derived states:
- *   - `hint=granted` and no recent failure → show "Allowed" + Re-check.
- *   - `hint=null` → show "Not asked yet" + Allow.
- *   - last probe failed → show "Probe failed" + Open settings + Re-check.
+ * System audio row — introspection via TCC.framework's TCCAccessPreflight on
+ * kTCCServiceAudioCapture, called through the native addon. Behaves exactly
+ * like MicrophoneRow: 2s poll for live updates, action button branches by
+ * grant state. The poll is side-effect-free (no audio tap is opened), so it
+ * is safe to run while a meeting is recording.
  */
 function SystemAudioRow() {
-  type Local = 'unknown' | 'granted' | 'failed';
-  const [state, setState] = useState<Local>(() =>
-    readBoolHint(AUDIO_CAP_HINT_KEY) ? 'granted' : 'unknown',
-  );
+  const [grant, setGrant] = useState<GrantState>('not_determined');
   const [busy, setBusy] = useState(false);
 
-  const probe = async () => {
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await window.electronAPI.permissions.read({ kind: 'audioCapture' });
+        if (!cancelled) setGrant(r.grant as GrantState);
+      } catch {
+        /* ignore transient IPC errors */
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const onAction = async () => {
     setBusy(true);
     try {
-      const r = await window.electronAPI.permissions.requestAudioCapture();
-      if (r.granted) {
-        writeBoolHint(AUDIO_CAP_HINT_KEY, true);
-        setState('granted');
-      } else {
-        writeBoolHint(AUDIO_CAP_HINT_KEY, false);
-        setState('failed');
+      if (grant === 'not_determined') {
+        const r = await window.electronAPI.permissions.requestAudioCapture();
+        setGrant(r.granted ? 'granted' : 'denied');
+      } else if (grant !== 'granted') {
+        await window.electronAPI.permissions.openSystemSettings({ kind: 'audioCapture' });
       }
     } finally {
       setBusy(false);
     }
   };
 
-  const openSettings = () => {
-    void window.electronAPI.permissions
-      .openSystemSettings({ kind: 'audioCapture' })
-      .catch(() => {});
-  };
-
   const pill =
-    state === 'granted' ? (
+    grant === 'granted' ? (
       <StatusPill tone="granted" label="Allowed" />
-    ) : state === 'failed' ? (
-      <StatusPill tone="denied" label="Probe failed" />
-    ) : (
+    ) : grant === 'not_determined' ? (
       <StatusPill tone="unknown" label="Not asked yet" />
+    ) : (
+      <StatusPill tone="denied" label="Denied" />
     );
 
   const actions =
-    state === 'granted' ? (
-      <button
-        type="button"
-        onClick={() => void probe()}
-        disabled={busy}
-        className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-40"
-      >
-        {busy ? 'Checking…' : 'Re-check'}
-      </button>
-    ) : state === 'failed' ? (
-      <>
-        <PrimaryActionButton onClick={openSettings} busy={busy}>
-          Open settings
-        </PrimaryActionButton>
-        <button
-          type="button"
-          onClick={() => void probe()}
-          disabled={busy}
-          className="text-[11px] text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
-        >
-          {busy ? 'Checking…' : 'Re-check'}
-        </button>
-      </>
-    ) : (
-      <PrimaryActionButton onClick={() => void probe()} busy={busy}>
-        {busy ? 'Checking…' : 'Allow'}
+    grant === 'granted' ? null : (
+      <PrimaryActionButton onClick={() => void onAction()} busy={busy}>
+        {grant === 'not_determined'
+          ? busy
+            ? 'Requesting…'
+            : 'Allow'
+          : busy
+            ? 'Opening…'
+            : 'Open settings'}
       </PrimaryActionButton>
     );
 
@@ -876,23 +863,6 @@ function AccessibilityRow() {
   );
 }
 
-function readBoolHint(key: string): boolean {
-  try {
-    return localStorage.getItem(key) === 'true';
-  } catch {
-    return false;
-  }
-}
-
-function writeBoolHint(key: string, value: boolean): void {
-  try {
-    if (value) localStorage.setItem(key, 'true');
-    else localStorage.removeItem(key);
-  } catch {
-    /* private mode or quota — ignore */
-  }
-}
-
 /**
  * AccountCard — shows the signed-in user + a Sign-out button.
  *
@@ -972,6 +942,7 @@ function AccountCard() {
         </div>
         <button
           type="button"
+          data-testid="sign-out-button"
           onClick={handleSignOut}
           disabled={busy}
           className="rounded-md border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"

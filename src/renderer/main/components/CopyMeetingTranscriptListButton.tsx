@@ -51,6 +51,8 @@ export function CopyMeetingTranscriptListButton({
     <div className="flex items-center gap-2">
       <button
         type="button"
+        data-testid="session-row-copy-button"
+        data-copied={copied ? 'true' : 'false'}
         onClick={handleCopy}
         disabled={disabled}
         className="inline-flex items-center gap-1 rounded-md border border-zinc-400 bg-black px-2 py-0.5 text-[11px] font-medium text-zinc-300 transition hover:border-zinc-300 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-zinc-400 disabled:hover:text-zinc-300"

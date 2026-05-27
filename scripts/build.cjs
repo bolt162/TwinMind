@@ -57,9 +57,23 @@ const OPTIONAL_VARS = new Set([
 const REQUIRED_VARS = BAKED_VARS.filter((n) => !OPTIONAL_VARS.has(n));
 
 function loadBakedEnv() {
-  // dotenv reads `.env` but does NOT overwrite values already in process.env,
-  // which gives CI / shell-set vars precedence — what we want.
-  dotenv.config({ path: path.join(repoRoot, '.env') });
+  // Load the env file(s) listed in TWINMIND_BUILD_ENV_FILES (comma-separated,
+  // first file wins because dotenv never overwrites already-set values), or
+  // fall back to plain `.env`. This lets `build:e2e` point at `.env.test`
+  // for a dev-environment bundle without touching the developer's prod `.env`.
+  //
+  // Either way, CI / shell-set vars still take precedence (loaded last by
+  // dotenv's no-override default).
+  const envFilesEnv = process.env.TWINMIND_BUILD_ENV_FILES;
+  const envFiles =
+    typeof envFilesEnv === 'string' && envFilesEnv.trim().length > 0
+      ? envFilesEnv.split(',').map((s) => s.trim()).filter(Boolean)
+      : ['.env'];
+  for (const file of envFiles) {
+    const absolutePath = path.isAbsolute(file) ? file : path.join(repoRoot, file);
+    dotenv.config({ path: absolutePath });
+    console.info(`▸ build.cjs: loaded env from ${absolutePath}`);
+  }
   const out = {};
   const missingRequired = [];
   for (const name of BAKED_VARS) {

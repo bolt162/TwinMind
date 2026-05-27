@@ -66,7 +66,6 @@ import { AccessibilityWatcher } from '@platform/darwin/AccessibilityWatcher';
 import type { IMicActivityMonitor } from '@platform/IMicActivityMonitor';
 import type { IGlobeKeyManager } from '@platform/IGlobeKeyManager';
 import { hotkeysEqual, type Hotkey } from '@core/hotkey/HotkeyTypes';
-import { resolveAudioteeBinaryPath } from '@platform/audioteeBinaryPath';
 import { UpdateService } from '@core/update/UpdateService';
 
 // userData folder. Set explicitly (rather than letting Electron derive from
@@ -87,17 +86,25 @@ import { UpdateService } from '@core/update/UpdateService';
 const USERDATA_DIRNAME = 'TwinMind';
 const LEGACY_USERDATA_DIRNAME = 'TwinMind-V2';
 {
-  const appData = app.getPath('appData');
-  const newPath = path.join(appData, USERDATA_DIRNAME);
-  const legacyPath = path.join(appData, LEGACY_USERDATA_DIRNAME);
-  try {
-    if (fs.existsSync(legacyPath) && !fs.existsSync(newPath)) {
-      fs.renameSync(legacyPath, newPath);
+  // E2E override: each spec passes a tmpdir via TWINMIND_USER_DATA_DIR so
+  // runs don't share DB / Keychain state with the user's real install.
+  const override = process.env.TWINMIND_USER_DATA_DIR;
+  if (override) {
+    fs.mkdirSync(override, { recursive: true });
+    app.setPath('userData', override);
+  } else {
+    const appData = app.getPath('appData');
+    const newPath = path.join(appData, USERDATA_DIRNAME);
+    const legacyPath = path.join(appData, LEGACY_USERDATA_DIRNAME);
+    try {
+      if (fs.existsSync(legacyPath) && !fs.existsSync(newPath)) {
+        fs.renameSync(legacyPath, newPath);
+      }
+    } catch {
+      // best-effort; setPath below still works against whatever's there
     }
-  } catch {
-    // best-effort; setPath below still works against whatever's there
+    app.setPath('userData', newPath);
   }
-  app.setPath('userData', newPath);
 }
 
 // ─── twinmind:// custom protocol (sign-in callback) ─────────────────────────
@@ -240,6 +247,14 @@ const MAIN_HTML = path.join(__dirname, '..', 'renderer', 'index.html');
 const HUD_DEV_URL = 'http://localhost:5173/hud.html';
 const MAIN_DEV_URL = 'http://localhost:5173/';
 
+/**
+ * Age threshold (ms) for the sibling sweep in `onChunkCompleted` that
+ * unsticks 'uploading' chunks orphaned by a previous crash. Must be >=
+ * the upload-fetch timeout (30 s in TwinMindAsrClient today) so we
+ * never race a still-in-flight live upload.
+ */
+const STUCK_UPLOADING_RECOVER_THRESHOLD_MS = 30_000;
+
 // ─── ComposedBindings ────────────────────────────────────────────────────────
 
 /**
@@ -364,8 +379,29 @@ function makeAudioLink(port: MessagePortMain): AudioProcessLink {
 
 function buildPlatformServices(): PlatformServices {
   const secureStorage = new DarwinSecureStorage();
-  const permissions = new DarwinPermissionService();
-  const paste = new DarwinPasteService();
+  // E2E mode swaps OS-touching services for in-memory fakes so the renderer
+  // and orchestrator paths run unchanged, but Playwright can fully drive
+  // them. macOS TCC prompts + paste keystrokes can't be automated otherwise.
+  const isE2E = process.env.TWINMIND_E2E === '1';
+  const permissions = isE2E
+    ? (() => {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { FakePermissionService } = require('@platform/test/FakePermissionService') as typeof import('@platform/test/FakePermissionService');
+        return new FakePermissionService({
+          mic: 'granted',
+          audioCapture: 'granted',
+          accessibility: 'granted',
+          notifications: 'granted',
+        });
+      })()
+    : new DarwinPermissionService();
+  const paste = isE2E
+    ? (() => {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { FakePasteService } = require('@platform/test/FakePasteService') as typeof import('@platform/test/FakePasteService');
+        return new FakePasteService();
+      })()
+    : new DarwinPasteService();
   const notifications = new DarwinNotificationService();
   const hotkeys = new DarwinHotkeyManager();
   const deviceMonitor = new DarwinDeviceMonitor();
@@ -487,6 +523,16 @@ function wireIpc(b: IpcBridgeMain): void {
   b.handle(REQUEST.AUTH_GET_STATE, () => requireShell().authProvider.getViewState());
   b.handle(REQUEST.AUTH_SIGN_IN, async () => {
     const r = await requireShell().authProvider.signIn();
+    if (!r.ok) {
+      // Surface sign-in failures (network, cancelled, config_missing, …)
+      // to analytics. Done at the IPC boundary instead of inside the
+      // provider so we don't have to inject analytics into the auth code.
+      requireShell().analytics.track('error_occurred', {
+        type: 'auth_sign_in',
+        error: r.error ?? 'unknown',
+        message: r.message ? r.message.slice(0, 200) : null,
+      });
+    }
     return {
       ok: r.ok,
       ...(r.error ? { error: r.error } : {}),
@@ -574,7 +620,7 @@ function wireIpc(b: IpcBridgeMain): void {
     granted: (await requireShell().platform.permissions.request('mic')) === 'granted',
   }));
   b.handle(REQUEST.PERMISSIONS_REQUEST_AUDIO_CAP, async () => ({
-    granted: await probeSystemAudio(requireShell().logger),
+    granted: (await requireShell().platform.permissions.request('audioCapture')) === 'granted',
   }));
   b.handle(REQUEST.PERMISSIONS_REQUEST_ACCESSIBILITY, async () => {
     const grant = await requireShell().platform.permissions.request('accessibility');
@@ -1320,6 +1366,40 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
     // whose transcripts already exist; recovered-then-transcribed needs
     // this per-chunk hook to land.
     void fireSummary(e.sessionId);
+
+    // Sibling sweep: if this chunk's session has any sibling chunks stuck
+    // in 'uploading' (orphaned by an earlier in-process crash mid-upload),
+    // reset them to 'captured' so the upload queue picks them up. Gated
+    // to non-active sessions and chunks older than the upload-fetch
+    // timeout (30 s) so we never race a live upload.
+    //
+    // Why this is needed despite startup recovery already resetting all
+    // 'uploading' rows: the user may keep the app running for hours
+    // between launches. Without this hook, a crash-recovered session
+    // whose orphan chunk completes successfully would still leave the
+    // sibling stuck-uploading chunk perma-blocking summary until the
+    // next app restart. This event-driven path closes that loop in
+    // real time.
+    try {
+      const recovered = c.jobStore.resetStuckUploadingForEndedSession(
+        e.sessionId,
+        STUCK_UPLOADING_RECOVER_THRESHOLD_MS,
+      );
+      if (recovered > 0) {
+        c.logger.info('reset stuck uploading siblings via chunk_completed', {
+          sessionId: e.sessionId,
+          count: recovered,
+        });
+      }
+    } catch (err) {
+      // Defensive — a sweep failure must not break the chunk_completed
+      // pipeline (transcript broadcast, dictation paste, etc).
+      c.logger.warn('sibling-sweep failed', {
+        sessionId: e.sessionId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     if (e.segment.text.trim() === '') return;
     const chunk = c.jobStore.getChunk(e.chunkId);
     if (!chunk) return;
@@ -1630,9 +1710,12 @@ async function fireSummary(sessionId: string): Promise<void> {
     broadcastSummaryState(sessionId, 'completed', result.summaryId, appliedTitle);
   } catch (err) {
     composed.jobStore.setSummaryFailed(sessionId);
-    shell.logger.warn('summary request failed', {
+    const message = err instanceof Error ? err.message : String(err);
+    shell.logger.warn('summary request failed', { sessionId, message });
+    composed.analytics.track('error_occurred', {
+      type: 'summary_request',
       sessionId,
-      message: err instanceof Error ? err.message : String(err),
+      message: message.slice(0, 200),
     });
     broadcastSummaryState(sessionId, 'failed');
   }
@@ -1693,75 +1776,102 @@ function broadcastUpdateState(): void {
   }
 }
 
-// ─── System-audio probe (unchanged from previous main.ts) ──────────────────
-
-async function probeSystemAudio(logger: Shell['logger']): Promise<boolean> {
-  type AudioTeeCtor = new (opts: {
-    sampleRate: number;
-    chunkDurationMs: number;
-    binaryPath?: string;
-  }) => {
-    on(event: 'data', cb: (b: Buffer) => void): unknown;
-    on(event: 'error', cb: (e: unknown) => void): unknown;
-    start(): Promise<void> | void;
-    stop(): Promise<void> | void;
+/**
+ * Wire `globalThis.__e2e` for Playwright specs. Only runs when
+ * `TWINMIND_E2E=1`. Playwright drives the app via
+ * `electronApp.evaluate(cb)` which executes `cb` inside main, so the hook
+ * just needs to live on the main-process global.
+ *
+ * Intentionally avoids new IPC channels (no zod schemas to maintain, no risk
+ * of a test channel slipping into prod) — everything routes through the
+ * already-built shell / composed objects.
+ */
+function registerE2eHooksIfEnabled(): void {
+  if (process.env.TWINMIND_E2E !== '1') return;
+  if (!shell) return;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { FakePermissionService } = require('@platform/test/FakePermissionService') as typeof import('@platform/test/FakePermissionService');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { FakePasteService } = require('@platform/test/FakePasteService') as typeof import('@platform/test/FakePasteService');
+  const perms = shell.platform.permissions as InstanceType<typeof FakePermissionService>;
+  const paste = shell.platform.paste as InstanceType<typeof FakePasteService>;
+  const g = globalThis as unknown as { __e2e?: unknown };
+  g.__e2e = {
+    permissions: perms,
+    paste,
+    getLastAuthBrowserUrl(): string | null {
+      return (globalThis as unknown as { __e2eLastAuthBrowserUrl?: string | null })
+        .__e2eLastAuthBrowserUrl ?? null;
+    },
+    clearLastAuthBrowserUrl(): void {
+      (globalThis as unknown as { __e2eLastAuthBrowserUrl?: string | null })
+        .__e2eLastAuthBrowserUrl = null;
+    },
+    deliverAuthCallback(url: string): void {
+      routeAuthCallback(url);
+    },
+    /**
+     * Mark onboarding as completed without driving the wizard UI. Used by
+     * specs that care about post-wizard flows (Settings, recording) but not
+     * about the wizard itself.
+     */
+    completeWizard(): void {
+      if (!shell) throw new Error('completeWizard: shell not ready');
+      shell.globalDb.setOnboardingCompletedAt(Date.now());
+      onboardingComplete = true;
+    },
+    /**
+     * Force the UpdateService into `ready` state so the renderer's
+     * UpdateBanner mounts. e2e launches via `_electron.launch` are NOT
+     * packaged (`app.isPackaged === false`), so the real
+     * `electron-updater` path is `disabled` and never fires
+     * `update-downloaded`. We reach into the service's private
+     * `transition` (TypeScript-private; not enforced at runtime) and push
+     * the state directly, then broadcast it through the existing IPC pipe
+     * so renderers see it the same way they would in production.
+     */
+    forceUpdateReady(version: string): void {
+      if (!updateService) throw new Error('forceUpdateReady: updateService not ready');
+      (updateService as unknown as {
+        transition: (p: {
+          phase: string;
+          version: string | null;
+          progressPercent: number | null;
+          error: null;
+        }) => void;
+      }).transition({
+        phase: 'ready',
+        version,
+        progressPercent: null,
+        error: null,
+      });
+      broadcastUpdateState();
+    },
+    diagnostics() {
+      const authView = shell!.authProvider.getViewState();
+      const orchSnap = composed?.orchestrator.snapshot() ?? {
+        state: 'idle' as const,
+        mode: 'idle' as const,
+        sessionId: null,
+        elapsedMs: 0,
+      };
+      return {
+        auth: {
+          isAuthenticated: authView.isAuthenticated,
+          userId: authView.user?.id ?? null,
+          userEmail: authView.user?.email ?? null,
+        },
+        orchestrator: {
+          state: orchSnap.state,
+          mode: orchSnap.mode,
+          sessionId: orchSnap.sessionId,
+        },
+        permissions: perms.snapshot(),
+        composedUserId: composed?.userId ?? null,
+      };
+    },
   };
-  let AudioTee: AudioTeeCtor;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('audiotee') as { AudioTee?: AudioTeeCtor; default?: AudioTeeCtor };
-    const ctor = mod.AudioTee ?? mod.default ?? (mod as unknown as AudioTeeCtor);
-    if (typeof ctor !== 'function') throw new Error('audiotee export not a constructor');
-    AudioTee = ctor;
-  } catch (err) {
-    logger.warn('audio-cap probe: audiotee unavailable', {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
-
-  const binaryPath = resolveAudioteeBinaryPath() ?? undefined;
-  logger.info('audio-cap probe: starting', { binaryPath: binaryPath ?? null });
-  const tee = new AudioTee({ sampleRate: 16_000, chunkDurationMs: 100, binaryPath });
-
-  return await new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (granted: boolean) => {
-      if (settled) return;
-      settled = true;
-      try {
-        void tee.stop();
-      } catch {
-        /* best-effort */
-      }
-      resolve(granted);
-    };
-    tee.on('data', () => finish(true));
-    tee.on('error', (e) => {
-      logger.info('audio-cap probe: error', {
-        message: e instanceof Error ? e.message : String(e),
-      });
-      finish(false);
-    });
-    setTimeout(() => finish(false), 4000);
-
-    try {
-      const p = tee.start();
-      if (p && typeof (p as Promise<void>).then === 'function') {
-        (p as Promise<void>).catch((e) => {
-          logger.info('audio-cap probe: start rejected', {
-            message: e instanceof Error ? e.message : String(e),
-          });
-          finish(false);
-        });
-      }
-    } catch (err) {
-      logger.info('audio-cap probe: start threw', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-      finish(false);
-    }
-  });
+  console.info('[main] e2e hooks registered (TWINMIND_E2E=1)');
 }
 
 // ─── App lifecycle ──────────────────────────────────────────────────────────
@@ -1825,6 +1935,19 @@ app.whenReady().then(async () => {
   // 2. Build the shell.
   shell = buildShell({ audioLink, platform, appVersion: app.getVersion() });
   shell.platform.deviceMonitor.start();
+
+  // Surface any native-addon load failure that happened in
+  // buildPlatformServices (which runs before shell exists). Stored in
+  // module-level micMonitorStatus and emitted now that analytics is
+  // available. Fires once per launch when the addon couldn't load —
+  // useful for spotting ABI mismatches and packaging regressions.
+  if (micMonitorStatus.monitorLoadError) {
+    shell.analytics.track('error_occurred', {
+      type: 'native_addon_load',
+      addon: 'mic_activity_monitor',
+      message: micMonitorStatus.monitorLoadError.slice(0, 200),
+    });
+  }
 
   // 2a. Accessibility watcher. Polls TCC trust state every ~1.5s and reacts
   // to transitions. Critical for the system-freeze fix: when the user
@@ -1909,6 +2032,13 @@ app.whenReady().then(async () => {
   bridge = new IpcBridgeMain(ipcMain, shell.logger);
   wireIpc(bridge);
 
+  // E2E test hook: expose a `globalThis.__e2e` surface so Playwright specs
+  // running outside the main process can drive permissions, OAuth callbacks,
+  // and read diagnostics via `electronApp.evaluate(cb)`. No-op unless
+  // TWINMIND_E2E=1. Lives next to the bridge so it has access to shell +
+  // composed + platform fakes.
+  registerE2eHooksIfEnabled();
+
   // 4. Initialize auth + subscribe to state changes.
   await shell.authProvider.initialize();
   shell.authProvider.onAuthChange(async () => {
@@ -1925,8 +2055,15 @@ app.whenReady().then(async () => {
     // the endpoint unauthenticated. Both calls are idempotent.
     if (userId !== null) {
       updateService?.startScheduler();
+      // Tag every subsequent analytics event with this user_id. Pre-sign-in
+      // events still flow with device_id only; the first post-identify event
+      // lets Amplitude stitch anonymous activity into the user's profile.
+      shell!.analytics.identify(userId);
     } else {
       updateService?.stopScheduler();
+      // Note: we do NOT clear the cached user_id on sign-out (no clear API
+      // on IAnalyticsClient). Events between sign-out and re-sign-in keep
+      // the previous user_id; misattribution risk is small for most users.
     }
     broadcastAuthState();
   });
@@ -1937,6 +2074,11 @@ app.whenReady().then(async () => {
   // 6. If already authenticated (rehydrated from globalDb), compose now.
   const initialUserId = shell.authProvider.getState().userId;
   if (initialUserId !== null) {
+    // Identify BEFORE swapComposedTo so any analytics events emitted by the
+    // per-user composition (recovery, queue startup) already carry user_id.
+    // onAuthChange doesn't fire on rehydrate, so this is the only place
+    // identify gets called for a session resumed from disk.
+    shell.analytics.identify(initialUserId);
     try {
       await swapComposedTo(initialUserId);
     } catch (err) {
@@ -1987,6 +2129,10 @@ app.on('window-all-closed', () => {
 app.on('before-quit', async (event) => {
   if (!shell) return;
   event.preventDefault();
+  // Fire app_quit BEFORE teardown so it's already in the queue when
+  // shell.shutdown() awaits the flush below. reason='user' for v1 — we
+  // don't yet distinguish updater-triggered quits from user-initiated.
+  shell.analytics.track('app_quit', { reason: 'user' });
   tray?.destroy();
   hud?.destroy();
   accessibilityWatcher?.stop();

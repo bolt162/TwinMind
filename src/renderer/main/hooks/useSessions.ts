@@ -53,10 +53,15 @@ export function useSessions(limit = 50) {
     const unsubState = window.electronAPI.on.recordingStateChanged(refresh);
     const unsubSegment = window.electronAPI.on.transcriptSegmentAppended(refresh);
     const unsubUiState = window.electronAPI.on.transcriptionUiState(refresh);
+    // Summary transitions update both `title` (backend may suggest one) and
+    // `summaryStatus` on the row. Without this the list keeps stale data
+    // until the user navigates away and back.
+    const unsubSummary = window.electronAPI.on.summaryStateChanged(refresh);
     return () => {
       unsubState();
       unsubSegment();
       unsubUiState();
+      unsubSummary();
     };
   }, [reload]);
 

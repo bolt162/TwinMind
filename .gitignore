@@ -20,11 +20,12 @@ test-results/
 .DS_Store
 *.log
 
-# env (the example file is committed; the real .env is not)
+# env (example files are committed; the real .env is not)
 .env
 .env.local
 .env.*
 !.env.example
+!.env.test.example
 
 # native build outputs (committed prebuilds live under native/<pkg>/prebuilds/)
 native/**/build/

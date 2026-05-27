@@ -9,7 +9,8 @@
         "src/DeviceChangeMonitor.mm",
         "src/GlobeKey.mm",
         "src/Paste.mm",
-        "src/FnUsageType.mm"
+        "src/FnUsageType.mm",
+        "src/TccAudioCapture.mm"
       ],
       "include_dirs": [
         "<!(node -p \"require('node-addon-api').include_dir\")"

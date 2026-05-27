@@ -21,9 +21,10 @@ export function SessionDetail({ sessionId, onClose }: Props) {
   const { data, error, loading } = useSession(sessionId);
 
   return (
-    <div className="space-y-3">
+    <div data-testid="session-detail" data-session-id={sessionId} className="space-y-3">
       <button
         type="button"
+        data-testid="session-detail-back"
         onClick={onClose}
         className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200"
       >
@@ -262,11 +263,16 @@ function TranscriptList({
               ? formatClockHHMM(sessionStartedAt + newContentStartMs)
               : `${formatTimestamp(newContentStartMs)} – ${formatTimestamp(t.endMs)}`;
           return (
-            <li key={t.chunkId} className="flex gap-3">
+            <li key={t.chunkId} data-testid="transcript-chunk" className="flex gap-3">
               <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums">
                 {label}
               </span>
-              <span className="text-sm text-zinc-100 whitespace-pre-wrap">{t.text}</span>
+              <span
+                data-testid="transcript-chunk-text"
+                className="text-sm text-zinc-100 whitespace-pre-wrap"
+              >
+                {t.text}
+              </span>
             </li>
           );
         })}

@@ -547,6 +547,10 @@ export function HudApp() {
         onMouseEnter={() => setGroupHovered(true)}
         onMouseLeave={() => setGroupHovered(false)}
         data-hud-interactive="true"
+        data-testid="hud-pill"
+        data-hud-visual={visual}
+        data-hud-mode={mode}
+        data-hud-recording={recording}
         aria-label={
           visual === 'recording'
             ? (mode === 'meeting' ? 'Stop meeting' : 'Stop dictation')
@@ -770,6 +774,7 @@ function MeetingButton({
       onMouseLeave={onLeave}
       aria-label="Capture Notes"
       data-hud-interactive="true"
+      data-testid="hud-capture-notes-button"
       className={[
         // h-8 (32 px) intentionally matches PILL_HEIGHT_EXPANDED on the
         // main pill so the two pills sit at the same baseline in

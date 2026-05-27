@@ -34,7 +34,11 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const advance = (next: Step) => setStep(next);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-8 text-zinc-100">
+    <div
+      data-testid="onboarding-flow"
+      data-onboarding-step={step}
+      className="flex min-h-screen items-center justify-center bg-zinc-950 p-8 text-zinc-100"
+    >
       <div className="w-full max-w-xl rounded-2xl border border-zinc-800 bg-zinc-900/60 p-8 shadow-2xl">
         {step === 'welcome' && <WelcomeStep onNext={() => advance('mic')} />}
         {step === 'mic' && <MicStep onNext={() => advance('audioCapture')} />}
@@ -60,14 +64,17 @@ function PrimaryButton({
   onClick,
   children,
   disabled,
+  testId,
 }: {
   onClick: () => void | Promise<void>;
   children: React.ReactNode;
   disabled?: boolean;
+  testId?: string;
 }) {
   return (
     <button
       type="button"
+      data-testid={testId}
       onClick={onClick}
       disabled={disabled}
       className={cn(
@@ -83,13 +90,16 @@ function PrimaryButton({
 function SecondaryButton({
   onClick,
   children,
+  testId,
 }: {
   onClick: () => void | Promise<void>;
   children: React.ReactNode;
+  testId?: string;
 }) {
   return (
     <button
       type="button"
+      data-testid={testId}
       onClick={onClick}
       className="text-sm text-zinc-400 hover:text-zinc-200"
     >
@@ -119,7 +129,7 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
           across all Spaces.
         </li>
       </ul>
-      <PrimaryButton onClick={onNext}>
+      <PrimaryButton testId="onboarding-welcome-next" onClick={onNext}>
         Get started <ChevronRight className="h-4 w-4" />
       </PrimaryButton>
     </>
@@ -205,24 +215,20 @@ function MicStep({ onNext }: { onNext: () => void }) {
       </div>
       <div className="flex items-center gap-3">
         {grant !== 'granted' && (
-          <PrimaryButton onClick={request} disabled={requesting}>
+          <PrimaryButton testId="onboarding-mic-grant" onClick={request} disabled={requesting}>
             {requesting ? (grant === 'denied' ? 'Opening…' : 'Requesting…') : 'Grant'}
           </PrimaryButton>
         )}
-        <SecondaryButton onClick={onNext}>{grant === 'granted' ? 'Continue' : 'Skip for now'}</SecondaryButton>
+        <SecondaryButton testId="onboarding-mic-next" onClick={onNext}>{grant === 'granted' ? 'Continue' : 'Skip for now'}</SecondaryButton>
       </div>
     </>
   );
 }
 
-// macOS has no introspection API for NSAudioCaptureUsageDescription or
-// notifications grant state — Electron can't tell us "is system audio
-// allowed?" without actually probing (which would fire a dialog if state is
-// not_determined). We persist a "user previously granted in this app"
-// hint to localStorage so a re-opened onboarding shows the green check
-// without re-probing. Stale if user revokes via System Settings, but
-// onboarding is one-time so that's an edge case.
-const AUDIO_CAP_GRANTED_KEY = 'twinmind.permissions.audioCaptureGranted';
+// System-audio capture is introspected via TCC.framework's TCCAccessPreflight
+// (wired through the native addon) — we poll it the same way AccessibilityStep
+// polls Accessibility. Notifications still has no introspection API, so we
+// keep the localStorage hint for that one only.
 const NOTIFICATIONS_REQUESTED_KEY = 'twinmind.permissions.notificationsRequested';
 
 function readLocalFlag(key: string): boolean {
@@ -243,20 +249,51 @@ function writeLocalFlag(key: string, value: boolean): void {
 }
 
 function AudioCaptureStep({ onNext }: { onNext: () => void }) {
-  const [granted, setGranted] = useState<boolean | null>(() =>
-    readLocalFlag(AUDIO_CAP_GRANTED_KEY) ? true : null,
-  );
+  // Three states: 'granted' / 'denied' / 'not_determined'. We poll the TCC
+  // database every 1s while mounted — same cadence as AccessibilityStep — so
+  // an out-of-app grant or revoke (e.g., user flipping the toggle in System
+  // Settings) is reflected here within a second.
+  type Grant = 'granted' | 'denied' | 'not_determined';
+  const [grant, setGrant] = useState<Grant>('not_determined');
   const [requesting, setRequesting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await window.electronAPI.permissions.read({ kind: 'audioCapture' });
+        if (!cancelled) {
+          const g = r.grant === 'granted' ? 'granted' : r.grant === 'denied' ? 'denied' : 'not_determined';
+          setGrant(g);
+        }
+      } catch {
+        /* ignore transient IPC errors */
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
   const request = async () => {
     setRequesting(true);
     try {
-      const r = await window.electronAPI.permissions.requestAudioCapture();
-      setGranted(r.granted);
-      if (r.granted) writeLocalFlag(AUDIO_CAP_GRANTED_KEY, true);
+      // 'not_determined' → fire the OS prompt. 'denied' → deep-link to the
+      // Privacy pane so the user has a one-click path to the toggle.
+      if (grant === 'not_determined') {
+        const r = await window.electronAPI.permissions.requestAudioCapture();
+        setGrant(r.granted ? 'granted' : 'denied');
+      } else {
+        await window.electronAPI.permissions.openSystemSettings({ kind: 'audioCapture' });
+      }
     } finally {
       setRequesting(false);
     }
   };
+
   return (
     <>
       <StepHeader
@@ -266,23 +303,29 @@ function AudioCaptureStep({ onNext }: { onNext: () => void }) {
       <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
         <Radio className="h-6 w-6 text-zinc-300" />
         <div className="text-sm text-zinc-300">
-          {granted === true && <span className="text-emerald-400">Granted ✓</span>}
-          {granted === false && (
+          {grant === 'granted' && <span className="text-emerald-400">Granted ✓</span>}
+          {grant === 'denied' && (
             <span className="text-amber-400">
-              Not granted. You can flip the toggle in System Settings → Privacy → Audio Capture.
+              Not granted. Click Open settings to flip the toggle in Privacy &amp; Security → Audio Capture.
             </span>
           )}
-          {granted === null && 'Click Grant — macOS will show its "Audio Capture" prompt.'}
+          {grant === 'not_determined' && 'Click Grant — macOS will show its "Audio Capture" prompt.'}
         </div>
       </div>
       <div className="flex items-center gap-3">
-        {granted !== true && (
-          <PrimaryButton onClick={request} disabled={requesting}>
-            {requesting ? 'Requesting…' : 'Grant'}
+        {grant !== 'granted' && (
+          <PrimaryButton testId="onboarding-audiocap-grant" onClick={request} disabled={requesting}>
+            {requesting
+              ? grant === 'denied'
+                ? 'Opening…'
+                : 'Requesting…'
+              : grant === 'denied'
+                ? 'Open settings'
+                : 'Grant'}
           </PrimaryButton>
         )}
-        <SecondaryButton onClick={onNext}>
-          {granted === true ? 'Continue' : 'Skip for now'}
+        <SecondaryButton testId="onboarding-audiocap-next" onClick={onNext}>
+          {grant === 'granted' ? 'Continue' : 'Skip for now'}
         </SecondaryButton>
       </div>
     </>
@@ -346,11 +389,11 @@ function AccessibilityStep({ onNext }: { onNext: () => void }) {
       </div>
       <div className="flex items-center gap-3">
         {granted !== true && (
-          <PrimaryButton onClick={request} disabled={requesting}>
+          <PrimaryButton testId="onboarding-accessibility-grant" onClick={request} disabled={requesting}>
             {requesting ? 'Opening…' : 'Grant'}
           </PrimaryButton>
         )}
-        <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+        <SecondaryButton testId="onboarding-accessibility-next" onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
       </div>
     </>
   );
@@ -389,11 +432,11 @@ function NotificationsStep({ onNext }: { onNext: () => void }) {
       </div>
       <div className="flex items-center gap-3">
         {granted !== true && (
-          <PrimaryButton onClick={request} disabled={requesting}>
+          <PrimaryButton testId="onboarding-notifications-grant" onClick={request} disabled={requesting}>
             {requesting ? 'Requesting…' : 'Allow'}
           </PrimaryButton>
         )}
-        <SecondaryButton onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
+        <SecondaryButton testId="onboarding-notifications-next" onClick={onNext}>{granted === true ? 'Continue' : 'Skip for now'}</SecondaryButton>
       </div>
     </>
   );
@@ -421,7 +464,7 @@ function DoneStep({ onComplete }: { onComplete: () => Promise<void> | void }) {
         title="You're set"
         subtitle={`Hold ${hotkeyLabel} to dictate. The floating mic pill at the bottom of your screen has the rest of the controls.`}
       />
-      <PrimaryButton onClick={onComplete}>Open TwinMind</PrimaryButton>
+      <PrimaryButton testId="onboarding-done-button" onClick={onComplete}>Open TwinMind</PrimaryButton>
     </>
   );
 }

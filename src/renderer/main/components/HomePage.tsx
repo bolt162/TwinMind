@@ -43,7 +43,7 @@ export function HomePage() {
         title="Dictation"
         steps={[
           <>
-            Press and hold <Kbd>{hotkeyLabel}</Kbd>
+            Press and hold <Kbd testId="home-hotkey-label">{hotkeyLabel}</Kbd>
           </>,
           <>Speak, then release to auto-paste the transcription where your cursor is</>,
           <>
@@ -179,9 +179,12 @@ function greetingForHour(h: number): string {
   return 'Good night,';
 }
 
-function Kbd({ children }: { children: string }) {
+function Kbd({ children, testId }: { children: string; testId?: string }) {
   return (
-    <kbd className="mx-0.5 inline-flex items-center rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200">
+    <kbd
+      data-testid={testId}
+      className="mx-0.5 inline-flex items-center rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200"
+    >
       {children}
     </kbd>
   );
@@ -284,7 +287,11 @@ function UpdateBanner() {
   };
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-emerald-700/60 bg-emerald-950/40 px-4 py-2.5">
+    <div
+      data-testid="update-banner"
+      data-update-version={state.version ?? ''}
+      className="flex items-center gap-3 rounded-lg border border-emerald-700/60 bg-emerald-950/40 px-4 py-2.5"
+    >
       <Download className="h-4 w-4 shrink-0 text-emerald-400" />
       <div className="flex-1 text-sm">
         {recordingActive ? (
@@ -299,6 +306,7 @@ function UpdateBanner() {
       </div>
       <button
         type="button"
+        data-testid="update-install-button"
         onClick={() => void onInstall()}
         disabled={recordingActive || submitting}
         className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"

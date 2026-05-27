@@ -118,6 +118,10 @@ function SessionRow({
     <li
       role="button"
       tabIndex={0}
+      data-testid="session-row"
+      data-session-id={session.id}
+      data-session-mode={session.mode}
+      data-session-status={session.status}
       onClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {

@@ -52,7 +52,10 @@ export function SignInScreen({ configMissing }: SignInScreenProps) {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-8 text-zinc-100">
+    <div
+      data-testid="sign-in-screen"
+      className="flex min-h-screen items-center justify-center bg-zinc-950 p-8 text-zinc-100"
+    >
       <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/60 p-8 shadow-2xl">
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">
           Welcome to TwinMind
@@ -76,6 +79,7 @@ export function SignInScreen({ configMissing }: SignInScreenProps) {
 
         <button
           type="button"
+          data-testid="sign-in-button"
           onClick={handleSignIn}
           disabled={busy || !!configBroken}
           className="mt-6 w-full rounded-lg bg-zinc-50 px-4 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
@@ -91,6 +95,7 @@ export function SignInScreen({ configMissing }: SignInScreenProps) {
           // finally clause then re-enables the form.
           <button
             type="button"
+            data-testid="sign-in-cancel-button"
             onClick={() => {
               void window.electronAPI.auth.cancelSignIn().catch(() => {});
             }}

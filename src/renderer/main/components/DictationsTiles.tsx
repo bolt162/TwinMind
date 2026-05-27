@@ -94,7 +94,12 @@ function DictationCard({
   };
 
   return (
-    <article className="group flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 transition-colors hover:border-zinc-700 hover:bg-zinc-900">
+    <article
+      data-testid="dictation-tile"
+      data-dictation-id={dictation.id}
+      data-dictation-status={dictation.status}
+      className="group flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 transition-colors hover:border-zinc-700 hover:bg-zinc-900"
+    >
       <header className="flex items-start gap-2">
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-300">
           <Mic className="h-3.5 w-3.5" />

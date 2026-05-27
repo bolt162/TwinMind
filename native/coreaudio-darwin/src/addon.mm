@@ -16,6 +16,7 @@ extern Napi::Object InitDeviceChangeMonitor(Napi::Env env, Napi::Object exports)
 extern Napi::Object InitGlobeKey(Napi::Env env, Napi::Object exports);
 extern Napi::Object InitPaste(Napi::Env env, Napi::Object exports);
 extern Napi::Object InitFnUsageType(Napi::Env env, Napi::Object exports);
+extern Napi::Object InitTccAudioCapture(Napi::Env env, Napi::Object exports);
 
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   InitMicCapture(env, exports);
@@ -24,6 +25,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   InitGlobeKey(env, exports);
   InitPaste(env, exports);
   InitFnUsageType(env, exports);
+  InitTccAudioCapture(env, exports);
   return exports;
 }
 

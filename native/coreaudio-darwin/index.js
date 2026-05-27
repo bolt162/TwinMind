@@ -251,6 +251,40 @@ function fnUsageType() {
   };
 }
 
+/**
+ * Query the macOS TCC state for kTCCServiceAudioCapture (the
+ * NSAudioCaptureUsageDescription permission used by Core Audio Taps).
+ * Synchronous, side-effect-free — safe to call while audiotee is recording.
+ * Returns one of: 'authorized' | 'denied' | 'not_determined' | 'unavailable'.
+ * 'unavailable' covers the future-macOS case where the private TCC symbol is
+ * missing; callers should treat it like 'not_determined' for UI purposes.
+ */
+function audioCapturePreflight() {
+  if (typeof native.audioCapturePreflight !== 'function') return 'unavailable';
+  try {
+    const v = native.audioCapturePreflight();
+    return typeof v === 'string' ? v : 'unavailable';
+  } catch (_) {
+    return 'unavailable';
+  }
+}
+
+/**
+ * Trigger the OS prompt for audio-capture if state is not_determined; resolve
+ * with the current grant otherwise. Resolves with one of:
+ * 'authorized' | 'denied' | 'unavailable'. Never throws.
+ */
+function audioCaptureRequest() {
+  if (typeof native.audioCaptureRequest !== 'function') {
+    return Promise.resolve('unavailable');
+  }
+  try {
+    return Promise.resolve(native.audioCaptureRequest()).catch(() => 'unavailable');
+  } catch (_) {
+    return Promise.resolve('unavailable');
+  }
+}
+
 module.exports = {
   micCapture,
   micMonitor,
@@ -259,4 +293,6 @@ module.exports = {
   globeKey,
   pasteCommandV,
   fnUsageType,
+  audioCapturePreflight,
+  audioCaptureRequest,
 };

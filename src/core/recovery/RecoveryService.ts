@@ -50,7 +50,25 @@ const LEGACY_WAV_HEADER_BYTES = 44;
 const LEGACY_WAV_BYTES_PER_SECOND = 16_000 * 1 * 2;
 
 export interface RecoveryOptions {
-  /** §11.5: 'uploading' rows untouched longer than this → reset. Default 10 min. */
+  /**
+   * §11.5: age threshold (ms) for resetting 'uploading' rows back to
+   * 'captured'. Default 0 — at startup we reset EVERY 'uploading' row
+   * regardless of age, because the upload queue hasn't started yet so
+   * there cannot be any healthy live uploads. Anything stuck in
+   * 'uploading' at startup is by definition orphaned by the previous
+   * process (crash or hard quit).
+   *
+   * The previous default (10 minutes) was a paranoid guard against a
+   * scenario that physically cannot happen at startup, and it caused a
+   * concrete bug: a session that crashed mid-upload + relaunched fast
+   * (within 10 min) left the in-flight chunk permanently stuck in
+   * 'uploading', which made `sessionHasInFlightChunks` perpetually true,
+   * which made `fireSummary` silently skip — manual "Generate Summary"
+   * clicks did nothing.
+   *
+   * Field is kept (not removed) so tests can inject a non-zero threshold
+   * if they need to verify the age gate works.
+   */
   readonly staleUploadingMs: number;
   /** §7.10: paused_by_sleep sessions older than this → auto-end. Default 30 min. */
   readonly sleepTimeoutMs: number;
@@ -59,7 +77,7 @@ export interface RecoveryOptions {
 }
 
 export const DEFAULT_RECOVERY_OPTIONS: RecoveryOptions = {
-  staleUploadingMs: 10 * 60 * 1000,
+  staleUploadingMs: 0,
   sleepTimeoutMs: 30 * 60 * 1000,
   retentionMs: 30 * 24 * 60 * 60 * 1000,
 };
@@ -245,10 +263,33 @@ export class RecoveryService {
       let maxIdx = existing.reduce((acc, c) => Math.max(acc, c.idx), -1);
       let lastEndMs = existing.reduce((acc, c) => Math.max(acc, c.end_ms), 0);
 
+      // Order orphan candidates by file mtime ASCENDING so they're processed
+      // in capture chronology. Without this we walk `readdirSync` order —
+      // filesystem-defined (typically alphabetical by random-UUID chunkId)
+      // — which is uncorrelated with when each PCM was actually written.
+      // The downstream chaining (idx + start_ms = lastEndMs + duration)
+      // depends on chronological order to produce a sensible transcript;
+      // get it wrong and a meeting that crashed mid-rotation comes back
+      // with chunks displayed in random order. mtime is sub-millisecond
+      // on APFS and the audio process writes PCMs ~30 s apart, so two
+      // orphans can never collide.
+      const orphanCandidates: Array<{ entry: fs.Dirent; mtimeMs: number }> = [];
       for (const entry of entries) {
         if (!entry.isFile()) continue;
+        if (!parseChunkAudioName(entry.name)) continue;
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(path.join(sessionDir, entry.name)).mtimeMs;
+        } catch {
+          // Unreadable stat → treat as oldest so it still gets a chance.
+        }
+        orphanCandidates.push({ entry, mtimeMs });
+      }
+      orphanCandidates.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+      for (const { entry } of orphanCandidates) {
         const parsed = parseChunkAudioName(entry.name);
-        if (!parsed) continue;
+        if (!parsed) continue; // unreachable — filtered above; keeps types narrow
         if (this.store.getChunk(parsed.chunkId)) continue; // already reconciled
 
         const filePath = path.join(sessionDir, entry.name);

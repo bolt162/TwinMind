@@ -179,31 +179,76 @@ export function buildShell({
     logger,
   });
   crash.init();
-  const analytics = buildAnalyticsClient({
-    apiKey: process.env.TWINMIND_AMPLITUDE_KEY ?? null,
-    version: appVersion,
-    logger,
-  });
-  analytics.track('app_launched', { version: appVersion, platform: process.platform });
 
-  // ─── Global DB (user directory + wizard state) ───────────────────────────
+  // ─── Global DB (user directory + wizard state + device_id) ───────────────
+  // Opened BEFORE analytics so we can pass a stable device_id to the client
+  // — Amplitude's @amplitude/analytics-node rejects events that have
+  // neither user_id nor device_id, so we must always supply at least
+  // device_id (even for the very first app_launched event below).
   const globalDb = GlobalDb.open(
     () => new Database(globalDbPath(userDataDir)),
     SystemClock,
   );
+  const deviceId = globalDb.getOrCreateDeviceId();
+
+  // Standard Amplitude event-level fields — surface as first-class columns
+  // in the Amplitude UI (Platform / OS / Brand / Language).
+  // device_model deliberately omitted: macOS exposes only opaque codes like
+  // 'MacBookPro18,3' via `sysctl hw.model`; not useful without a decoder.
+  // country/region/city are derived server-side by Amplitude from the POST
+  // source IP (Project Settings → Privacy → Location Tracking).
+  const deviceContext = {
+    platform: 'macos',
+    os_name: 'macOS',
+    // Electron exposes the OS release as `process.getSystemVersion()`
+    // (e.g. '14.4.0' on macOS Sonoma 14.4). app doesn't carry this; cast
+    // narrows the Electron-augmented `process` to the right shape.
+    os_version: (process as NodeJS.Process & { getSystemVersion?: () => string })
+      .getSystemVersion?.() ?? '',
+    device_brand: 'Apple',
+    device_manufacturer: 'Apple',
+    language: app.getLocale(),
+  };
+  // User properties — non-standard fields attached to the device/user profile
+  // in Amplitude. device_type/device_family are static for a Mac desktop
+  // build, so setting them once per session via every event is idempotent
+  // and lets the Amplitude UI segment by these properties.
+  const userProperties = {
+    device_type: 'Desktop',
+    device_family: 'Mac',
+  };
+
+  const analytics = buildAnalyticsClient({
+    apiKey: resolveAmplitudeKey(),
+    version: appVersion,
+    deviceId,
+    deviceContext,
+    userProperties,
+    logger,
+  });
+  analytics.track('app_launched', { version: appVersion, platform: process.platform });
 
   // ─── Auth provider (machine-scoped) ──────────────────────────────────────
   const configResolution = resolveTwinMindBackendConfig();
   if (!configResolution.ok) {
     logger.warn('twinmind backend config missing', { missing: configResolution.missing });
   }
+  // E2E mode intercepts the system-browser open so the Playwright spec can
+  // drive Google OAuth in its own Chromium context and feed the
+  // `twinmind://` callback back through `globalThis.__e2e.deliverAuthCallback`.
+  // Production path is unchanged.
+  const isE2E = process.env.TWINMIND_E2E === '1';
   const authProvider = new TwinMindAuthProvider({
     configResolution,
     globalDb,
     secureStorage: platform.secureStorage,
     clock: SystemClock,
     logger,
-    openBrowser: (url) => electronShell.openExternal(url),
+    openBrowser: isE2E
+      ? (url) => {
+          (globalThis as unknown as { __e2eLastAuthBrowserUrl?: string }).__e2eLastAuthBrowserUrl = url;
+        }
+      : (url) => electronShell.openExternal(url),
   });
 
   return {
@@ -389,8 +434,20 @@ async function composeForUser({ shell, userId, clock }: ComposeForUserInput): Pr
   orchestrator.on('state_changed', (s) => {
     if (s.state === 'recording') {
       shell.analytics.track('recording_started', { mode: s.mode });
-    } else if (s.state === 'idle' && s.mode !== 'idle') {
-      shell.analytics.track('recording_stopped', { duration_sec: Math.round(s.elapsedMs / 1000) });
+    } else if (s.state === 'stopping') {
+      // Fire on 'stopping' (not 'idle'): the orchestrator clears `active`
+      // BEFORE emitting state_changed for 'idle', so by the time we see
+      // state='idle' the snapshot's `mode` has already been reset to 'idle'
+      // — the previous condition `state==='idle' && mode!=='idle'` was
+      // mathematically unreachable, which is why recording_stopped never
+      // reached Amplitude. On 'stopping' the active session is still set
+      // and `mode` carries the just-ended session's mode. Failed starts
+      // (starting → idle without passing through 'stopping') correctly
+      // skip both events.
+      shell.analytics.track('recording_stopped', {
+        duration_sec: Math.round(s.elapsedMs / 1000),
+        mode: s.mode,
+      });
     }
   });
 
@@ -541,6 +598,32 @@ function buildSummaryClient(
     },
     logger,
   });
+}
+
+/**
+ * Production Amplitude write-key. Amplitude write-keys are PUBLIC by design
+ * — they're embedded in every web / mobile / desktop client that uses
+ * Amplitude — so committing this is the standard pattern and not a secret
+ * leak. The env var takes precedence so devs/CI can override (e.g. point
+ * at a staging Amplitude project).
+ */
+const PROD_AMPLITUDE_KEY = '757c07dc1d6420ba03b732f8f8560030';
+
+/**
+ * Pick the Amplitude key based on env + build context:
+ *   - env var `TWINMIND_AMPLITUDE_KEY` set     → use it (dev override path).
+ *   - production build, env var unset          → use PROD_AMPLITUDE_KEY.
+ *   - development build, env var unset         → null (no-op analytics, no
+ *     surprise events fire during local testing).
+ *
+ * `NODE_ENV === 'development'` is set by `scripts/dev.cjs` and never set in
+ * a packaged build, so this branch correctly distinguishes the two.
+ */
+function resolveAmplitudeKey(): string | null {
+  const envKey = process.env.TWINMIND_AMPLITUDE_KEY;
+  if (envKey && envKey.length > 0) return envKey;
+  if (process.env.NODE_ENV === 'development') return null;
+  return PROD_AMPLITUDE_KEY;
 }
 
 /** YYYY-MM-DD stamp for daily log rotation. */

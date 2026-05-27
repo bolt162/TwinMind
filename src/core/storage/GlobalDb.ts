@@ -25,6 +25,7 @@
  * same reason `0001_initial.ts` inlines its SQL — bundler-stable bytes.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Database } from 'better-sqlite3';
 import { prepareDatabase, type Migration } from './Migrator';
 import type { Clock } from '@core/util/Clock';
@@ -79,9 +80,23 @@ CREATE TABLE schema_migrations (
 );
 `;
 
+// v2: machine-wide key-value store. First use case is a stable device_id for
+// analytics — Amplitude's @amplitude/analytics-node SDK requires either a
+// user_id or a device_id on every event; we always send device_id (and add
+// user_id on sign-in). Generic kv keeps the door open for future machine-
+// scoped non-user data without another migration.
+const SQL_V2_KV = `
+CREATE TABLE kv (
+  k           TEXT PRIMARY KEY,
+  v           TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+`;
+
 /** Migrations applied to `global.db`. Keep ordered + append-only — same rules as the per-user app.db. */
 export const GLOBAL_MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'global_initial', sql: SQL_V1_GLOBAL_INITIAL },
+  { version: 2, name: 'kv', sql: SQL_V2_KV },
 ];
 
 // ─── Public shape ───────────────────────────────────────────────────────────
@@ -301,6 +316,40 @@ export class GlobalDb {
         'UPDATE wizard SET onboarding_completed_at = NULL, updated_at = ? WHERE id = 1',
       )
       .run(this.clock.now());
+  }
+
+  // ─── Device identity ─────────────────────────────────────────────────────
+
+  /**
+   * Stable per-machine identifier used as the `device_id` on every analytics
+   * event. Generated lazily on first call and persisted under kv[device_id];
+   * the same value is returned on every subsequent call (and after restart).
+   *
+   * Why this exists: Amplitude's @amplitude/analytics-node requires either a
+   * `user_id` or a `device_id` on every event server-side. Pre-sign-in events
+   * (e.g., `app_launched`) have no user_id, so we always attach a device_id
+   * derived from this method. After sign-in we also attach `user_id`, giving
+   * Amplitude both fields so it can stitch anonymous activity into the user's
+   * profile.
+   *
+   * Atomic via single-statement INSERT OR IGNORE — if a parallel caller (test
+   * fixture, future code) raced to insert, the loser's UUID is discarded and
+   * both callers read back the winning row.
+   */
+  getOrCreateDeviceId(): string {
+    const existing = this.db
+      .prepare(`SELECT v FROM kv WHERE k = 'device_id'`)
+      .get() as { v: string } | undefined;
+    if (existing) return existing.v;
+    const fresh = randomUUID();
+    this.db
+      .prepare(`INSERT OR IGNORE INTO kv (k, v, updated_at) VALUES ('device_id', ?, ?)`)
+      .run(fresh, this.clock.now());
+    // Re-read in case of race; the INSERT OR IGNORE means the winner persists.
+    const row = this.db
+      .prepare(`SELECT v FROM kv WHERE k = 'device_id'`)
+      .get() as { v: string };
+    return row.v;
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────

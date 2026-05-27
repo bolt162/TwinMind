@@ -706,6 +706,36 @@ export class JobStore {
     return r.changes;
   }
 
+  /**
+   * In-session sibling sweep: reset any 'uploading' chunks for a given
+   * non-active session that have been stuck longer than `thresholdMs`.
+   *
+   * Called from main's `onChunkCompleted` handler so that when one chunk
+   * for a session completes (e.g., an orphan-recovered chunk from a
+   * previous crash), any sibling chunks left in 'uploading' by that same
+   * crash get unstuck immediately — without waiting for the next app
+   * launch's startup-recovery sweep.
+   *
+   * Two guards:
+   *   - `session NOT active` — never touch chunks of a live session;
+   *     their 'uploading' state reflects real work in progress.
+   *   - `updated_at < now - thresholdMs` — should match the upload-fetch
+   *     timeout (30 s today). Past this point any chunk still 'uploading'
+   *     must be orphaned, because a live fetch would have either resolved
+   *     or aborted by then.
+   *
+   * Returns the number of rows reset.
+   */
+  resetStuckUploadingForEndedSession(sessionId: string, thresholdMs: number): number {
+    const now = this.clock.now();
+    const r = this.stmts.resetStuckUploadingForEndedSession.run({
+      session_id: sessionId,
+      now,
+      threshold: now - thresholdMs,
+    });
+    return r.changes;
+  }
+
   /** §11.5: rows where state='completed' but the file is still present on disk. */
   findCompletedRows(): ChunkRow[] {
     return this.stmts.findCompleted.all() as ChunkRow[];
@@ -1030,6 +1060,21 @@ export class JobStore {
       resetStuckUploading: this.db.prepare(`
         UPDATE chunks SET state='captured', updated_at=@now
         WHERE state='uploading' AND updated_at < @threshold
+      `),
+      // In-session sibling sweep. Same shape as resetStuckUploading but
+      // scoped to one session AND only fires when that session is no
+      // longer 'active'. Called from main on chunk_completed events so
+      // a session can self-heal post-crash without waiting for the next
+      // app launch.
+      resetStuckUploadingForEndedSession: this.db.prepare(`
+        UPDATE chunks
+        SET state='captured', updated_at=@now
+        WHERE state='uploading'
+          AND session_id=@session_id
+          AND updated_at < @threshold
+          AND session_id IN (
+            SELECT id FROM sessions WHERE id=@session_id AND status != 'active'
+          )
       `),
       findCompleted: this.db.prepare(`SELECT * FROM chunks WHERE state='completed'`),
       findChunksForFileCheck: this.db.prepare(`
