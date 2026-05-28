@@ -394,7 +394,18 @@ export class RecordingOrchestrator {
       deviceBoundary: true,
       sleepBoundary: false,
     });
-    this.link.send({ type: 'open_chunk', chunkId, startMs: resumeAtMs, overlapPrefixMs: 0 });
+    this.link.send({
+      type: 'open_chunk',
+      chunkId,
+      startMs: resumeAtMs,
+      overlapPrefixMs: 0,
+      // Resume is a continuation: this chunk is idx >= 1, so it gets the
+      // steady (post-first) target — 60 s for meetings. Index-aware via the
+      // behavior keeps the policy in one place.
+      ...(p.behavior.enableChunkRotation
+        ? { newAudioTargetMs: p.behavior.chunkRotationIntervalMs(nextIdx) }
+        : {}),
+    });
 
     this.active = {
       sessionId: p.sessionId,
@@ -560,6 +571,11 @@ export class RecordingOrchestrator {
       chunkId,
       startMs: chunkStartMs,
       overlapPrefixMs: 0,
+      // Only rotating modes get a target; dictation omits it (no rotation),
+      // so the audio-process never fires a rotation we'd ignore anyway.
+      ...(behavior.enableChunkRotation
+        ? { newAudioTargetMs: behavior.chunkRotationIntervalMs(0) }
+        : {}),
     });
 
     this.active = {
@@ -631,12 +647,16 @@ export class RecordingOrchestrator {
 
     // True end of NEW audio for the current chunk:
     //   startMs of chunk + overlap that was prepended at its open + the
-    //   chunkRotationIntervalMs() worth of fresh content the audio-process
-    //   accumulated before emitting `rotation_due`. The previous version
+    //   chunkRotationIntervalMs(currentChunkIdx) worth of fresh content the
+    //   audio-process accumulated before emitting `rotation_due`. The interval
+    //   is index-aware (meeting: 15 s for chunk 0, 60 s after) so this MUST use
+    //   the CURRENT chunk's index, not the next one. The previous version
     //   omitted `currentChunkOverlapMs`, which drifted every chunk after the
     //   first two seconds earlier than the timeline displayed in the HUD.
     const endMs =
-      a.currentChunkStartMs + a.currentChunkOverlapMs + a.behavior.chunkRotationIntervalMs();
+      a.currentChunkStartMs +
+      a.currentChunkOverlapMs +
+      a.behavior.chunkRotationIntervalMs(a.chunkIdx);
     this.link.send({ type: 'close_chunk', chunkId: a.currentChunkId, endMs });
     // audio-process replies with chunk_closed; we open the next chunk eagerly
     // here so the open_chunk message arrives in order. The 2 s overlap is
@@ -663,6 +683,13 @@ export class RecordingOrchestrator {
       chunkId: nextChunkId,
       startMs: nextStartMs,
       overlapPrefixMs: overlap,
+      // Target for the chunk we're opening — index-aware so the audio-process
+      // fires `rotation_due` after exactly this chunk's worth of new audio.
+      // Only set on rotating modes (tickRotation only runs when
+      // enableChunkRotation, but stay explicit for safety).
+      ...(a.behavior.enableChunkRotation
+        ? { newAudioTargetMs: a.behavior.chunkRotationIntervalMs(nextIdx) }
+        : {}),
     });
 
     a.chunkIdx = nextIdx;

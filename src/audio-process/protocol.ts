@@ -86,6 +86,19 @@ export interface OpenChunkMsg {
    * emitted PCM to the new chunk (the 2 s overlap of meeting mode).
    */
   readonly overlapPrefixMs: number;
+  /**
+   * Target amount of *new* audio (ms, excluding any overlap prepend) this
+   * chunk should accumulate before the audio-process emits `rotation_due`.
+   * The orchestrator sends it per chunk so the chunking policy lives entirely
+   * in `MeetingModeBehavior` (e.g. 15 s for the first chunk, 60 s after) and
+   * the audio-process is a dumb executor of whatever target it's told.
+   *
+   * Optional + omitted for dictation (no rotation). When absent, the
+   * audio-process falls back to its legacy default (30 s) — a defensive guard
+   * that should never execute, since main and audio-process ship in the same
+   * build and the orchestrator always supplies it for rotating (meeting) chunks.
+   */
+  readonly newAudioTargetMs?: number;
 }
 
 /** Close the active chunk, flush its tail, emit `chunk_closed`. */

@@ -23,8 +23,14 @@ export interface ModeBehavior {
   /** Force-stop predicate evaluated each chunk-rotation tick. */
   shouldForceStop(elapsedMs: number, ctx: BehaviorContext): boolean;
 
-  /** Interval between chunk-rotation events when `enableChunkRotation` is true. */
-  chunkRotationIntervalMs(): number;
+  /**
+   * Amount of new audio (ms) the chunk at `chunkIdx` should hold before the
+   * next rotation. Index-aware so a mode can vary chunk length by position —
+   * meeting mode uses a shorter first chunk for a fast initial transcript,
+   * then a steady longer cadence. Only consulted when `enableChunkRotation`
+   * is true.
+   */
+  chunkRotationIntervalMs(chunkIdx: number): number;
 
   /** Overlap-prefix to pass to the audio-process for the chunk at `chunkIdx`. */
   nextChunkOverlapMs(chunkIdx: number): number;

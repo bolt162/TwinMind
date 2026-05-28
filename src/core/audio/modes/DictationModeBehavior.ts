@@ -22,7 +22,7 @@ export class DictationModeBehavior implements ModeBehavior {
   }
 
   /** Dictation is a one-chunk session; the rotation interval is never used. */
-  chunkRotationIntervalMs(): number {
+  chunkRotationIntervalMs(_chunkIdx: number): number {
     return Number.POSITIVE_INFINITY;
   }
 

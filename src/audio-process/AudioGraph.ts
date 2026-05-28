@@ -80,9 +80,10 @@ export class AudioGraph {
    * value of `samplesEmitted / sampleRate * 1000` *before* any of this chunk's
    * frames were counted. Used to drive audio-clock-aligned chunk rotation:
    * when (currentSessionAudioClock − chunkAudioClockAtOpen) crosses
-   * `CHUNK_NEW_AUDIO_MS`, we tell main it's time to rotate. That guarantees
-   * each chunk holds exactly 30 s of new audio (the overlap prepend is
-   * additional and doesn't count toward the threshold).
+   * `chunkNewAudioTargetMs` (the per-chunk target from main), we tell main
+   * it's time to rotate. That guarantees each chunk holds exactly its target
+   * of new audio (the overlap prepend is additional and doesn't count toward
+   * the threshold).
    */
   private chunkAudioClockAtOpen = 0;
   /**
@@ -129,12 +130,20 @@ export class AudioGraph {
   private pendingCrossfade: Int16Array | null = null;
   private static readonly CROSSFADE_SAMPLES = 80; // 5 ms @ 16 kHz
   /**
-   * The architectural target for new audio per chunk. When the current chunk
-   * has accumulated this much audio since `openChunk` (measured in session
-   * audio-clock, not wall-clock), we fire `rotation_due` to main. Total file
-   * for a meeting chunk is then 30 s new + 2 s overlap = 32 s.
+   * Legacy default target for new audio per chunk. Used only as a fallback
+   * when `open_chunk` arrives without a `newAudioTargetMs` (should never
+   * happen for rotating chunks — main always supplies it). The live target is
+   * `chunkNewAudioTargetMs`, set per chunk in `openChunk`.
    */
   private static readonly CHUNK_NEW_AUDIO_MS = 30_000;
+  /**
+   * The new-audio target for the *current* chunk, set from the orchestrator's
+   * `open_chunk.newAudioTargetMs`. When the chunk has accumulated this much
+   * audio since `openChunk` (measured in session audio-clock, not wall-clock),
+   * we fire `rotation_due`. Meeting mode varies it by chunk index (15 s first,
+   * 60 s after); the overlap prepend is additional and doesn't count toward it.
+   */
+  private chunkNewAudioTargetMs = AudioGraph.CHUNK_NEW_AUDIO_MS;
 
   /** Software AGC applied to mic frames pre-mixer. Re-created on every
    *  startSession so state doesn't leak across recordings. Quiet voice
@@ -273,6 +282,9 @@ export class AudioGraph {
     // (handled below) doesn't count — it's audio already emitted into the
     // previous chunk's tail, not new capture.
     this.chunkAudioClockAtOpen = (this.samplesEmitted / this.sessionSampleRate) * 1000;
+    // Per-chunk rotation target from main. Fallback to the legacy 30 s default
+    // only if absent (defensive; main always sends it for rotating chunks).
+    this.chunkNewAudioTargetMs = msg.newAudioTargetMs ?? AudioGraph.CHUNK_NEW_AUDIO_MS;
     this.rotationDueSent = false;
 
     if (msg.overlapPrefixMs > 0 && this.overlapTail.length > 0) {
@@ -407,7 +419,7 @@ export class AudioGraph {
         audioClockMs,
       });
       // Audio-clock-driven chunk rotation. When this chunk has had
-      // CHUNK_NEW_AUDIO_MS of new audio (not counting the prepended overlap,
+      // chunkNewAudioTargetMs of new audio (not counting the prepended overlap,
       // which was already counted in the previous chunk), tell main it's
       // time to close + open the next. Idempotent within a chunk via
       // rotationDueSent — only the first qualifying frame fires it, the
@@ -416,7 +428,7 @@ export class AudioGraph {
       if (
         !this.rotationDueSent &&
         this.currentChunkId &&
-        audioClockMs - this.chunkAudioClockAtOpen >= AudioGraph.CHUNK_NEW_AUDIO_MS
+        audioClockMs - this.chunkAudioClockAtOpen >= this.chunkNewAudioTargetMs
       ) {
         this.rotationDueSent = true;
         this.send({ type: 'rotation_due' });
@@ -461,11 +473,11 @@ export class AudioGraph {
 
     // Stall coinciding with chunk boundary — still fire rotation_due so the
     // next chunk opens on schedule. Without this, a stall that lands right
-    // at the 30 s mark would push rotation off forever.
+    // at the target mark would push rotation off forever.
     if (
       !this.rotationDueSent &&
       this.currentChunkId &&
-      audioClockMs - this.chunkAudioClockAtOpen >= AudioGraph.CHUNK_NEW_AUDIO_MS
+      audioClockMs - this.chunkAudioClockAtOpen >= this.chunkNewAudioTargetMs
     ) {
       this.rotationDueSent = true;
       this.send({ type: 'rotation_due' });

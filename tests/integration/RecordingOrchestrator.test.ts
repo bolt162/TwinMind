@@ -149,10 +149,15 @@ describe('RecordingOrchestrator — meeting chunk rotation', () => {
   beforeEach(() => (h = setup()));
   afterEach(() => teardown(h));
 
-  it('tickRotation closes current chunk and opens the next with 2s overlap', () => {
+  it('first rotation closes the 15s chunk 0 and opens chunk 1 (60s target, 2s overlap)', () => {
     h.orchestrator.startMeeting({ title: 'standup' });
-    const beforeRotate = h.link.outbound.length;
+    // The chunk-0 open_chunk carries the 15s first-chunk target.
+    const open0 = h.link.outbound.find((m) => m.type === 'open_chunk') as
+      | { newAudioTargetMs?: number }
+      | undefined;
+    expect(open0!.newAudioTargetMs).toBe(15_000);
 
+    const beforeRotate = h.link.outbound.length;
     h.orchestrator.tickRotation();
 
     const since = h.link.outbound.slice(beforeRotate) as MainToAudio[];
@@ -160,14 +165,39 @@ describe('RecordingOrchestrator — meeting chunk rotation', () => {
       | { chunkId: string; endMs: number }
       | undefined;
     const open = since.find((m) => m.type === 'open_chunk') as
-      | { chunkId: string; startMs: number; overlapPrefixMs: number }
+      | { chunkId: string; startMs: number; overlapPrefixMs: number; newAudioTargetMs?: number }
       | undefined;
     expect(close).toBeDefined();
     expect(open).toBeDefined();
     expect(open!.overlapPrefixMs).toBe(2_000);
-    expect(close!.endMs).toBe(30_000);
-    // chunk N+1 starts 2s before the prior chunk ended (overlap-prefix).
-    expect(open!.startMs).toBe(28_000);
+    // Chunk 0 is the short 15s first chunk.
+    expect(close!.endMs).toBe(15_000);
+    // chunk 1 starts 2s before chunk 0 ended (overlap-prefix).
+    expect(open!.startMs).toBe(13_000);
+    // chunk 1 onward uses the steady 60s target.
+    expect(open!.newAudioTargetMs).toBe(60_000);
+  });
+
+  it('steady-state rotation: chunk 1 is 60s, chunk 2 opens at 73s with a 60s target', () => {
+    h.orchestrator.startMeeting();
+    // Rotate twice: idx 0 (15s) → idx 1 (60s) → idx 2.
+    h.orchestrator.tickRotation();
+    const beforeSecond = h.link.outbound.length;
+    h.orchestrator.tickRotation();
+
+    const since = h.link.outbound.slice(beforeSecond) as MainToAudio[];
+    const close = since.find((m) => m.type === 'close_chunk') as
+      | { endMs: number }
+      | undefined;
+    const open = since.find((m) => m.type === 'open_chunk') as
+      | { startMs: number; overlapPrefixMs: number; newAudioTargetMs?: number }
+      | undefined;
+    // chunk 1 spans 13s start + 2s overlap + 60s new audio → ends at 75s.
+    expect(close!.endMs).toBe(75_000);
+    // chunk 2 starts 2s before that (overlap-prefix), with the 60s target.
+    expect(open!.startMs).toBe(73_000);
+    expect(open!.overlapPrefixMs).toBe(2_000);
+    expect(open!.newAudioTargetMs).toBe(60_000);
   });
 
   it('chunk_closed for a voiced chunk persists state=captured', async () => {
