@@ -1026,7 +1026,14 @@ function syncFnUsageForHotkey(
       if (saved === null) deps.globalDb.setFnUsageSaved(FN_USAGE_NOT_OWNED);
       return;
     }
-    if (saved === null) deps.globalDb.setFnUsageSaved(String(cur));
+    // `cur` is either a non-zero number or null (key unset → OS behaves as the
+    // emoji default). Only persist a real numeric value; for the unset case
+    // record the not-owned sentinel instead of `String(null)` ("null"), which
+    // later parseInt()s to NaN in restoreFnUsageIfOwned and silently skips the
+    // restore. We still set 0 in both cases so the OS doesn't pop the panel.
+    if (saved === null) {
+      deps.globalDb.setFnUsageSaved(cur === null ? FN_USAGE_NOT_OWNED : String(cur));
+    }
     const ok = fn.set(0);
     deps.logger.info('fn-usage-type set to 0 (Do Nothing)', { previous: cur, ok });
   } else {
@@ -1240,7 +1247,16 @@ function attachComposedBindings(c: ComposedApp, s: Shell): ComposedBindings {
       },
     });
     globe.start();
-    const globeSuppressed = () => primary !== null && !isFnOnlyHotkey(primary);
+    // Suppress the Globe (Fn) gesture exactly when a NON-Fn primary hotkey is
+    // active, so Fn and the custom hotkey aren't both live. Read the LIVE
+    // hotkey from `composedBindings` (updated on every SETTINGS_SET) rather
+    // than the `primary` captured at attach time — otherwise switching away
+    // from Fn would leave Fn erroneously active (two hotkeys), and the value
+    // would never reflect later changes within the session.
+    const globeSuppressed = () => {
+      const active = composedBindings?.primaryHotkey ?? null;
+      return active !== null && !isFnOnlyHotkey(active);
+    };
     globe.onPress(() => {
       if (hotkeyCaptureWebContents && bridge) {
         try {

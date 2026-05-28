@@ -106,6 +106,16 @@ export function HotkeyCaptureField({ value, onChange }: Props) {
       // Always consume — we don't want stray triggers in the page underneath.
       e.preventDefault();
       e.stopPropagation();
+      // While Fn is held, IGNORE an incoming Escape. The native Globe tap
+      // synthesizes an Esc on every Fn release (to dismiss the emoji panel),
+      // and that synthetic Esc can race ahead of the forwarded Fn-up. If we
+      // folded it in we'd commit a bogus "Fn+Escape", which commit() rejects
+      // WITHOUT ending the capture — stranding `hotkeyCaptureWebContents` and
+      // breaking Fn dictation. Dropping it lets the subsequent Fn-up commit Fn
+      // cleanly. (Escape alongside a real modifier, e.g. ⌘+Escape, still works.)
+      if (e.code === 'Escape' && heldRef.current.has('Fn')) {
+        return;
+      }
       if (e.code === 'Escape' && heldRef.current.size === 0) {
         cancel();
         return;
@@ -151,6 +161,18 @@ export function HotkeyCaptureField({ value, onChange }: Props) {
       unsubFn();
     };
   }, [listening, cancel, commit]);
+
+  // Safety net: if the field unmounts (e.g. the user navigates away from
+  // Settings) while a capture is in flight, main would otherwise keep its
+  // `hotkeyCaptureWebContents` pointed at this dead view and forward every
+  // real Fn press to it instead of starting dictation. Always end the capture
+  // on unmount — main's HOTKEY_CAPTURE_END only clears when the sender matches,
+  // so this is a no-op when we never began.
+  useEffect(() => {
+    return () => {
+      void window.electronAPI.hotkey.captureEnd().catch(() => {});
+    };
+  }, []);
 
   // null and Fn-only both surface as "Fn" — they're functionally identical
   // (Globe handles both). The picker uses Fn-only to express user intent.
