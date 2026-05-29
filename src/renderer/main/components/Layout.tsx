@@ -1,7 +1,7 @@
 /**
  * Layout — top-level shell for the main window.
  *
- * Tab nav (Home / Dictations / Meetings / Settings) plus a content area.
+ * Tab nav (Home / Dictations / Notes / Settings) plus a content area.
  * Active tab is held in App.tsx state so the user's selection survives focus
  * loss.
  *
@@ -11,9 +11,9 @@
  * repurposed from a control panel into a landing page.
  */
 
-import type { ReactNode } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import { cn } from './cn';
-import { ArrowUpRight, Home, Mic, Radio, Settings as SettingsIcon } from 'lucide-react';
+import { ArrowUpRight, Home, Mic, Settings as SettingsIcon } from 'lucide-react';
 
 export type Tab = 'recording' | 'dictations' | 'meetings' | 'settings';
 
@@ -23,10 +23,16 @@ interface LayoutProps {
   readonly children: ReactNode;
 }
 
-const TABS: ReadonlyArray<{ id: Tab; label: string; icon: typeof Home }> = [
+const TABS: ReadonlyArray<{
+  id: Tab;
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+}> = [
   { id: 'recording', label: 'Home', icon: Home },
   { id: 'dictations', label: 'Dictations', icon: Mic },
-  { id: 'meetings', label: 'Meetings', icon: Radio },
+  // Tab id stays 'meetings' for IPC stability (NAVIGATE_TAB etc.); only the
+  // user-visible label + icon changed — same pattern as Home being 'recording'.
+  { id: 'meetings', label: 'Notes', icon: CaptureNotesBars },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -72,5 +78,24 @@ export function Layout({ tab, onTabChange, children }: LayoutProps) {
       </header>
       <main className="flex-1 overflow-y-auto p-4">{children}</main>
     </div>
+  );
+}
+
+/**
+ * Three static vertical bars (short-tall-short) — the same equalizer mark the
+ * HUD's "Capture Notes" button uses (see HudApp's CaptureNotesBars). `bg-current`
+ * so the bars pick up the tab's text color (active vs. inactive). Sized by the
+ * `className` the nav passes (h-3.5 w-3.5), matching the other tab icons' footprint.
+ */
+function CaptureNotesBars({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn('inline-flex shrink-0 items-center justify-center gap-[1.5px]', className)}
+      aria-hidden
+    >
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 7 }} />
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 13 }} />
+      <span className="block w-[1.5px] rounded-full bg-current" style={{ height: 7 }} />
+    </span>
   );
 }
