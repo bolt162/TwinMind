@@ -9,8 +9,13 @@
  *                     (the NSAudioCaptureUsageDescription permission used by
  *                     Core Audio Taps; no public Electron API exposes this)
  *   - accessibility → `systemPreferences.isTrustedAccessibilityClient(false)`
- *   - notifications → no Electron API; treated as `granted` once we attempt
- *                     to post a Notification (the OS surfaces the prompt).
+ *   - notifications → no introspection. macOS gives Electron sole ownership of
+ *                     UNUserNotificationCenter (the delegate that presents
+ *                     foreground banners); a second consumer reading/requesting
+ *                     authorization suppresses the app's own notifications. So
+ *                     read()/request() report 'granted' optimistically and the
+ *                     OS prompt is fired through Electron's own Notification API
+ *                     in main.ts. The real on/off lives in System Settings.
  *
  * For deep-linking to the Privacy pane we shell out to `x-apple.systempreferences:`
  * URLs — supported on macOS 10.10+.
@@ -67,7 +72,12 @@ const PRIVACY_DEEP_LINKS: Record<PermissionKind, string | null> = {
     'x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture',
   accessibility:
     'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
-  notifications: null,
+  // macOS 13+ (the app's minimum) exposes the Notifications pane via this
+  // settings-extension anchor. There's no reliable per-app sub-anchor, so this
+  // lands on the Notifications list where TwinMind is registered with its
+  // toggle off — the one-click fix path for a `denied` state.
+  notifications:
+    'x-apple.systempreferences:com.apple.Notifications-Settings.extension',
 };
 
 /** Convert macOS's mic-access-status enum to our grant enum. */
@@ -110,8 +120,10 @@ export class DarwinPermissionService implements IPermissionService {
           ? 'granted'
           : 'not_determined';
       case 'notifications':
-        // No introspection API; we optimistically report 'granted'. Show() will
-        // surface the OS prompt the first time and the user will allow/deny.
+        // No introspection: Electron owns the notification center, and a second
+        // UNUserNotificationCenter consumer here suppresses the app's own
+        // banners. We optimistically report 'granted'; Electron's Notification
+        // show() surfaces the OS prompt the first time and the user allows/denies.
         return 'granted';
     }
   }
@@ -143,6 +155,10 @@ export class DarwinPermissionService implements IPermissionService {
         return ok ? 'granted' : 'not_determined';
       }
       case 'notifications':
+        // The OS prompt is fired via Electron's Notification API in main.ts
+        // (PERMISSIONS_REQUEST_NOTIFICATIONS), NOT here — Electron must remain
+        // the sole owner of UNUserNotificationCenter. request() just reports
+        // the optimistic grant.
         return 'granted';
     }
   }

@@ -12,7 +12,8 @@
     "src/renderer/**/*",
     "src/ipc/channels.ts",
     "src/ipc/validators.ts",
-    "src/core/hotkey/HotkeyTypes.ts"
+    "src/core/hotkey/HotkeyTypes.ts",
+    "src/core/asr/dictationPrompt.ts"
   ],
   "exclude": ["**/*.test.ts"]
 }

@@ -53,6 +53,14 @@ export interface AppSettings {
      */
     primary: Hotkey | null;
   };
+  dictation: {
+    /**
+     * User's custom dictation cleanup prompt (the "Personalize your Dictation"
+     * setting). `null` = use the built-in DEFAULT_DICTATION_PROMPT. An empty /
+     * whitespace-only string also falls back to the default at send time.
+     */
+    customPrompt: string | null;
+  };
   privacy: {
     /** Whether to send audio to the configured ASR provider. Off → fully local-no-op. */
     sendAudioToProvider: boolean;
@@ -94,6 +102,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     systemMixGain: 0.4,
   },
   hotkeys: { primary: null },
+  dictation: { customPrompt: null },
   privacy: { sendAudioToProvider: true, autoDeleteOlderThanDays: 30 },
   meetingDetection: { enabled: true, autoStart: false },
   advanced: { logLevel: 'info', asrProvider: 'twinmind', vadSilenceThresholdDbfs: -50 },
@@ -216,6 +225,7 @@ function mergeDefaults(user: Partial<AppSettings>): AppSettings {
     general: { ...DEFAULT_SETTINGS.general, ...(user.general ?? {}) },
     recording: { ...DEFAULT_SETTINGS.recording, ...(user.recording ?? {}) },
     hotkeys: mergeHotkeys(user.hotkeys),
+    dictation: { ...DEFAULT_SETTINGS.dictation, ...(user.dictation ?? {}) },
     privacy: { ...DEFAULT_SETTINGS.privacy, ...(user.privacy ?? {}) },
     meetingDetection: {
       ...DEFAULT_SETTINGS.meetingDetection,

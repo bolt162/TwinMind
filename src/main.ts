@@ -627,6 +627,15 @@ function wireIpc(b: IpcBridgeMain): void {
     return { granted: grant === 'granted' };
   });
   b.handle(REQUEST.PERMISSIONS_REQUEST_NOTIFICATIONS, async () => {
+    // Prompt through Electron's own Notification API — NOT a native
+    // UNUserNotificationCenter.requestAuthorization call. Electron must remain
+    // the sole owner of the notification center: it sets the delegate that
+    // lets banners present while the app is in the foreground. A second,
+    // independent UNUserNotificationCenter consumer in the native addon
+    // displaced that ownership and silently suppressed all meeting banners.
+    // Showing an Electron notification triggers the OS authorization prompt the
+    // first time (when not_determined) and registers Electron's delegate. The
+    // live status pill reads the real grant separately (read-only path).
     try {
       const { Notification: ElectronNotification } = await import('electron');
       if (ElectronNotification.isSupported()) {
@@ -1639,12 +1648,15 @@ async function swapComposedTo(userId: string | null): Promise<void> {
     }
     composed = null;
   }
-  if (userId === null) {
-    // No active user → no active hotkey. Restore the user's prior
-    // AppleFnUsageType so the OS Fn behavior isn't stuck on "Do Nothing"
-    // across sign-out. The next compose (re-sign-in) will re-evaluate.
-    restoreFnUsageIfOwned({ globalDb: s.globalDb, logger: s.logger });
-  }
+  // NOTE: we intentionally do NOT restore AppleFnUsageType on sign-out. For a
+  // user whose hotkey is Fn, flipping the OS preference back to "Show Emoji"
+  // here (or on quit) is what re-poisons the per-app preference caches of
+  // already-running apps on macOS: the OS caches AppleFnUsageType per app at
+  // launch and doesn't reliably reload it, so a flip back to emoji sticks until
+  // each app is relaunched. Keeping the value monotonic at 0 (set once, never
+  // reset while Fn is the hotkey) is what makes Fn reliably suppress the emoji
+  // panel. The user's prior value is still restored on the deliberate switch to
+  // a non-Fn hotkey — see syncFnUsageForHotkey's non-Fn branch.
   if (userId !== null) {
     composed = await s.composeForUser(userId);
     composedBindings = attachComposedBindings(composed, s);
@@ -2272,9 +2284,14 @@ app.on('before-quit', async (event) => {
     }
     updateService = null;
   }
-  // Restore the user's AppleFnUsageType BEFORE shell.shutdown() closes
-  // globalDb. After this point the kv read/write would throw.
-  restoreFnUsageIfOwned({ globalDb: shell.globalDb, logger: shell.logger });
+  // We intentionally do NOT restore AppleFnUsageType on quit. Restoring the
+  // user's prior "Show Emoji" here flips the OS preference back, and because
+  // macOS caches it per app at launch (and doesn't reliably reload running
+  // apps), the next launch's set-to-0 won't reach already-running apps — so the
+  // emoji panel reappears until each app is relaunched. Keeping 0 monotonic
+  // across quit/relaunch is what reliably suppresses the panel for Fn users.
+  // The prior value is restored only on a deliberate switch to a non-Fn hotkey
+  // (syncFnUsageForHotkey's non-Fn branch).
   await shell.shutdown();
   shell = null;
   audioProcessHandle?.kill();

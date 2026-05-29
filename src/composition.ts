@@ -387,7 +387,7 @@ async function composeForUser({ shell, userId, clock }: ComposeForUserInput): Pr
   }
 
   // ─── ASR + summary clients ──────────────────────────────────────────────
-  const asrClient: IAsrClient = buildAsrClient(cfg, shell.authProvider, logger);
+  const asrClient: IAsrClient = buildAsrClient(cfg, shell.authProvider, settings, logger);
   const summaryClient = buildSummaryClient(shell.authProvider, logger);
 
   // ─── Upload queue ───────────────────────────────────────────────────────
@@ -535,6 +535,7 @@ async function composeForUser({ shell, userId, clock }: ComposeForUserInput): Pr
 function buildAsrClient(
   cfg: AppSettings,
   authProvider: TwinMindAuthProvider,
+  settings: SettingsStore,
   logger: Logger,
 ): IAsrClient {
   const envProvider = process.env.TWINMIND_ASR_PROVIDER as 'twinmind' | 'mock' | undefined;
@@ -573,6 +574,9 @@ function buildAsrClient(
       getAccessToken: () => authProvider.getAccessToken(),
       refreshAccessToken: () => authProvider.refreshNow(),
     },
+    // Read the custom dictation prompt fresh per transcribe so an Apply in
+    // Settings takes effect on the next dictation without an app restart.
+    dictationPromptProvider: () => settings.load().settings.dictation?.customPrompt ?? null,
     logger,
   });
 }

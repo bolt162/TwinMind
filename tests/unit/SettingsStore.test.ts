@@ -97,6 +97,22 @@ describe('SettingsStore', () => {
     // Other groups defaulted in.
     expect(r.settings.meetingDetection).toEqual(DEFAULT_SETTINGS.meetingDetection);
     expect(r.settings.advanced.vadSilenceThresholdDbfs).toBe(-50);
+    // The dictation section is new; an older file without it defaults to null
+    // (= use the built-in prompt).
+    expect(r.settings.dictation).toEqual({ customPrompt: null });
+  });
+
+  it('dictation.customPrompt defaults to null and round-trips a custom value', () => {
+    expect(store.load().settings.dictation.customPrompt).toBeNull();
+    store.update((s) => {
+      s.dictation.customPrompt = 'Make it concise.';
+    });
+    expect(store.load().settings.dictation.customPrompt).toBe('Make it concise.');
+    // Clearing back to null (the fallback) round-trips too.
+    store.update((s) => {
+      s.dictation.customPrompt = null;
+    });
+    expect(store.load().settings.dictation.customPrompt).toBeNull();
   });
 
   it('update() applies mutator and persists', () => {

@@ -4,6 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { AsrError } from '@core/asr/AsrError';
 import { TwinMindAsrClient } from '@core/asr/TwinMindAsrClient';
+import {
+  DEFAULT_DICTATION_PROMPT,
+  MAX_DICTATION_PROMPT_LENGTH,
+} from '@core/asr/dictationPrompt';
 import type { TranscribeRequest } from '@core/asr/IAsrClient';
 
 function makeReq(audioPath: string): TranscribeRequest {
@@ -26,7 +30,10 @@ interface QueuedResponse {
   headers?: Record<string, string>;
 }
 
-function buildClient(responses: QueuedResponse[]) {
+function buildClient(
+  responses: QueuedResponse[],
+  opts: { dictationPromptProvider?: () => string | null } = {},
+) {
   const calls: Array<{ url: string; init: RequestInit | undefined; auth?: string | null }> = [];
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : (input as URL).toString();
@@ -63,6 +70,9 @@ function buildClient(responses: QueuedResponse[]) {
     },
     auth,
     fetchImpl,
+    ...(opts.dictationPromptProvider
+      ? { dictationPromptProvider: opts.dictationPromptProvider }
+      : {}),
   });
 
   return { client, calls, getRefreshCount: () => refreshCount };
@@ -114,21 +124,52 @@ describe('TwinMindAsrClient', () => {
     expect(body.get('model')).toBe('twinmind-pro');
   });
 
-  it('attaches the dictation cleanup prompt on every dictation request', async () => {
+  it('attaches the default cleanup prompt on dictation requests when no custom prompt is set', async () => {
     const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }]);
     const req = { ...makeReq(audioPath), mode: 'dictation' as const, source: 'mic' as const };
     await client.transcribe(req);
     const body = calls[0]?.init?.body as FormData;
-    const prompt = body.get('prompt');
-    expect(typeof prompt).toBe('string');
-    // Tag the test by a stable phrase the cleanup instruction starts with.
-    // Full text is a long multi-paragraph instruction; substring match keeps
-    // the test resilient to whitespace tweaks.
-    expect(String(prompt)).toContain('Rewrite this voice dictation');
+    // Asserts against the shared constant so it never drifts from the source.
+    expect(body.get('prompt')).toBe(DEFAULT_DICTATION_PROMPT);
   });
 
-  it('does not attach a dictation-cleanup prompt on meeting requests', async () => {
-    const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }]);
+  it('uses the user custom prompt on dictation when the provider returns a non-empty string', async () => {
+    const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }], {
+      dictationPromptProvider: () => 'Make it sound like a pirate.',
+    });
+    const req = { ...makeReq(audioPath), mode: 'dictation' as const, source: 'mic' as const };
+    await client.transcribe(req);
+    const body = calls[0]?.init?.body as FormData;
+    expect(body.get('prompt')).toBe('Make it sound like a pirate.');
+  });
+
+  it('falls back to the default prompt when the custom provider returns null or whitespace', async () => {
+    for (const provided of [null, '', '   \n\t  ']) {
+      const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }], {
+        dictationPromptProvider: () => provided,
+      });
+      const req = { ...makeReq(audioPath), mode: 'dictation' as const, source: 'mic' as const };
+      await client.transcribe(req);
+      const body = calls[0]?.init?.body as FormData;
+      expect(body.get('prompt')).toBe(DEFAULT_DICTATION_PROMPT);
+    }
+  });
+
+  it('defensively clamps an over-long custom prompt to the max length', async () => {
+    const huge = 'x'.repeat(MAX_DICTATION_PROMPT_LENGTH + 500);
+    const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }], {
+      dictationPromptProvider: () => huge,
+    });
+    const req = { ...makeReq(audioPath), mode: 'dictation' as const, source: 'mic' as const };
+    await client.transcribe(req);
+    const body = calls[0]?.init?.body as FormData;
+    expect(String(body.get('prompt')).length).toBe(MAX_DICTATION_PROMPT_LENGTH);
+  });
+
+  it('does not attach a dictation-cleanup prompt on meeting requests, even when a custom prompt is set', async () => {
+    const { client, calls } = buildClient([{ status: 200, body: { transcript: '' } }], {
+      dictationPromptProvider: () => 'should be ignored for meetings',
+    });
     // Meeting request with no contextHint — prompt must be absent.
     await client.transcribe(makeReq(audioPath));
     const body = calls[0]?.init?.body as FormData;

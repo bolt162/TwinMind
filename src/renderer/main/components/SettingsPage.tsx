@@ -7,10 +7,11 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Mic, Radio, Accessibility as AccessibilityIcon } from 'lucide-react';
+import { Mic, Radio, Accessibility as AccessibilityIcon, Bell } from 'lucide-react';
 import { useSettings } from '../hooks/useSettings';
 import { cn } from './cn';
 import { HotkeyCaptureField } from './HotkeyCaptureField';
+import { DictationPromptField } from './DictationPromptField';
 import type { Hotkey } from '@core/hotkey/HotkeyTypes';
 
 export function SettingsPage() {
@@ -44,6 +45,7 @@ export function SettingsPage() {
   const recording = (draft.recording ?? {}) as Record<string, unknown>;
   const meeting = (draft.meetingDetection ?? {}) as Record<string, unknown>;
   const hotkeys = (draft.hotkeys ?? {}) as Record<string, unknown>;
+  const dictation = (draft.dictation ?? {}) as Record<string, unknown>;
 
   return (
     <div className="space-y-6">
@@ -91,6 +93,22 @@ export function SettingsPage() {
             (e.g., right ⌥) or modifier + key (e.g., ⌘⇧D). Setting a non-Fn
             hotkey here disables the Fn (Globe) key as a built-in dictation
             shortcut.
+          </span>
+        </div>
+      </Section>
+
+      <Section title="Personalize your Dictation">
+        <div className="space-y-1">
+          <span className="block text-sm">Customize how your dictation is cleaned up</span>
+          <DictationPromptField
+            value={(dictation.customPrompt as string | null) ?? null}
+            onApply={(v) => setPath('dictation.customPrompt', v)}
+          />
+          <span className="block text-xs text-zinc-500">
+            This instruction is applied to your dictation transcripts (filler
+            removal, punctuation, casing, light formatting). Edit it to change
+            the style, then press Apply. Clear it and Apply to restore the
+            default. Affects dictation only — meetings are unchanged.
           </span>
         </div>
       </Section>
@@ -541,9 +559,6 @@ function InputDeviceField({
 //   - Deep-link to the matching Privacy & Security pane on `denied` so the
 //     user has a one-click path to the toggle that matters.
 //
-// Notifications are intentionally excluded: macOS gives us no introspection
-// AND no deep-link target, so a row would be a half-broken UX.
-//
 // Per-permission caveats:
 //   - Mic: real introspection via `permissions.read({kind:'mic'})`. 2s poll
 //     while the page is mounted catches outside-the-app changes.
@@ -554,6 +569,13 @@ function InputDeviceField({
 //     against kTCCServiceAudioCapture (wired through the native addon).
 //     Same 2s poll pattern as mic — a revoke via System Settings is reflected
 //     within one tick.
+//   - Notifications: NO live introspection. macOS gives Electron sole
+//     ownership of UNUserNotificationCenter (the delegate that presents
+//     banners), so any second consumer that reads/requests authorization
+//     suppresses the app's own meeting banners. We therefore drive this row
+//     off a local "requested" flag (shared with onboarding) rather than the
+//     OS state. The OS prompt is fired through Electron's Notification API
+//     (main.ts); the real on/off lives in System Settings → Notifications.
 
 type GrantState = 'granted' | 'denied' | 'not_determined' | 'unavailable';
 
@@ -563,6 +585,7 @@ function PermissionsCard() {
       <MicrophoneRow />
       <SystemAudioRow />
       <AccessibilityRow />
+      <NotificationsRow />
     </div>
   );
 }
@@ -857,6 +880,94 @@ function AccessibilityRow() {
       icon={<AccessibilityIcon className="h-4 w-4" />}
       title="Accessibility"
       description="Required for Fn dictation, custom hotkeys, and auto-paste."
+      pill={pill}
+      actions={actions}
+    />
+  );
+}
+
+// Shared with onboarding's NotificationsStep so granting in either place
+// reflects in the other. We can't read the real OS state (see the
+// PermissionsCard comment), so this best-effort flag is all we have.
+const NOTIFICATIONS_REQUESTED_KEY = 'twinmind.permissions.notificationsRequested';
+
+function readNotificationsRequested(): boolean {
+  try {
+    return localStorage.getItem(NOTIFICATIONS_REQUESTED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Notifications row — NO OS introspection (by design; see PermissionsCard
+ * comment). Electron must remain the sole owner of UNUserNotificationCenter,
+ * so we never read or request authorization natively — that would suppress
+ * the app's own meeting banners.
+ *
+ * Instead the row is driven by a local "requested" flag (shared with
+ * onboarding). "Grant" fires the OS prompt through Electron's Notification API
+ * (main.ts → PERMISSIONS_REQUEST_NOTIFICATIONS) and records the flag. Once
+ * requested, we surface an "Open settings" deep-link, since the authoritative
+ * on/off toggle lives in System Settings → Notifications.
+ */
+function NotificationsRow() {
+  const [requested, setRequested] = useState<boolean>(() => readNotificationsRequested());
+  const [busy, setBusy] = useState(false);
+
+  const onGrant = async () => {
+    setBusy(true);
+    try {
+      // Electron-owned prompt: shows the macOS dialog the first time, and a
+      // confirmation banner thereafter. We treat the click as "requested"
+      // regardless of the (best-effort) return, matching onboarding.
+      await window.electronAPI.permissions.requestNotifications();
+      try {
+        localStorage.setItem(NOTIFICATIONS_REQUESTED_KEY, 'true');
+      } catch {
+        /* private mode / quota — fine, just no persistence */
+      }
+      setRequested(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onOpenSettings = async () => {
+    setBusy(true);
+    try {
+      await window.electronAPI.permissions.openSystemSettings({ kind: 'notifications' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pill = requested ? (
+    <StatusPill tone="granted" label="Enabled" />
+  ) : (
+    <StatusPill tone="unknown" label="Not enabled" />
+  );
+
+  const actions = requested ? (
+    <button
+      type="button"
+      onClick={() => void onOpenSettings()}
+      disabled={busy}
+      className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+    >
+      {busy ? 'Opening…' : 'Open settings'}
+    </button>
+  ) : (
+    <PrimaryActionButton onClick={() => void onGrant()} busy={busy}>
+      {busy ? 'Requesting…' : 'Grant'}
+    </PrimaryActionButton>
+  );
+
+  return (
+    <PermissionRow
+      icon={<Bell className="h-4 w-4" />}
+      title="Notifications"
+      description="Lets TwinMind notify you when a meeting is detected. Managed in System Settings → Notifications."
       pill={pill}
       actions={actions}
     />
